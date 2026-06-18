@@ -8,7 +8,7 @@ A voice-first Progressive Web App for practicing better conversations through AI
 |-------|-----------|
 | Frontend | React 18 (via CDN, no build step), Babel Standalone for JSX |
 | Backend | Vercel Functions — Edge Runtime (`chat-stream`, `tts`, `stt`) + Node.js (`chat`, legacy) |
-| AI | Anthropic Claude API (claude-sonnet-4-20250514) |
+| AI | Anthropic Claude API (claude-sonnet-4-6) |
 | TTS | OpenAI TTS API (`tts-1` model, `shimmer` voice) — streamed as raw PCM for gapless playback, MP3 fallback |
 | STT | **Primary**: OpenAI Realtime API over WebRTC (`gpt-4o-mini-transcribe`, server VAD, hands-free). Fallbacks: native Web Speech API (`SpeechRecognition`), then MediaRecorder → `/api/stt` (Whisper) |
 | Hosting | Vercel |

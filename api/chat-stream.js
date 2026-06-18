@@ -30,9 +30,17 @@ export default async function handler(req) {
         'anthropic-version': '2023-06-01'
       },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
+        // claude-sonnet-4-20250514 was retired by Anthropic on 2026-06-15;
+        // requests to it now 404, which is why voice "stopped working" (the
+        // chat call failed, so no reply was ever generated or spoken). This
+        // is its documented drop-in successor. thinking is disabled and
+        // effort kept low so per-sentence streaming stays as snappy as the
+        // old Sonnet 4 — Sonnet 4.6 otherwise defaults to high effort.
+        model: 'claude-sonnet-4-6',
         max_tokens: max_tokens || 1000,
         stream: true,
+        thinking: { type: 'disabled' },
+        output_config: { effort: 'low' },
         system: system,
         messages: messages
       })
