@@ -1,4 +1,4 @@
-const CACHE_NAME = 'feel-understood-v2.4.3';
+const CACHE_NAME = 'feel-understood-v2.4.4';
 const STATIC_ASSETS = [
   '/',
   '/index.html',

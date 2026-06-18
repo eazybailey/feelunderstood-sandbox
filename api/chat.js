@@ -22,7 +22,10 @@ export default async function handler(req, res) {
         'anthropic-version': '2023-06-01'
       },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
+        // claude-sonnet-4-20250514 was retired 2026-06-15 → 404. Replaced
+        // with its drop-in successor. (Legacy non-streaming path; not on the
+        // active voice pipeline, but kept current so it doesn't 404 too.)
+        model: 'claude-sonnet-4-6',
         max_tokens: max_tokens || 1000,
         system: system,
         messages: messages
