@@ -1,17 +1,8 @@
 export const config = { runtime: 'edge' };
 
+// Same-origin only: the app calls this with a relative URL, so no CORS
+// headers are sent — a wildcard made this a free cross-site Claude proxy.
 export default async function handler(req) {
-  if (req.method === 'OPTIONS') {
-    return new Response(null, {
-      status: 200,
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type',
-      },
-    });
-  }
-
   if (req.method !== 'POST') {
     return new Response(JSON.stringify({ error: 'Method not allowed' }), {
       status: 405,
@@ -113,7 +104,6 @@ export default async function handler(req) {
         'Cache-Control': 'no-cache, no-transform',
         'Connection': 'keep-alive',
         'X-Accel-Buffering': 'no',
-        'Access-Control-Allow-Origin': '*',
       },
     });
   } catch (error) {
