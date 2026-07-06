@@ -578,14 +578,14 @@ Remember: you are holding space for two people to feel heard by each other. Your
           React.createElement('span', { className: 'gate-eyebrow' }, 'Beta'),
           React.createElement('h1', { className: 'gate-title' }, 'Feel Understood'),
           React.createElement('p', { className: 'gate-lede' },
-            "We’re testing a stripped-down version. You’ll build a quick Feel Understood profile, then go straight into the Communication Helpline — a place to talk through a conversation that matters."
+            "We’re testing a stripped-down version. Tell us your first name and you’ll go straight into the Communication Helpline — a place to talk through a conversation that matters."
           ),
           React.createElement('button', {
             className: 'gate-cta',
             onClick: onChooseBeta,
           }, 'Try the Beta'),
           React.createElement('p', { className: 'gate-note' },
-            "Takes 2–3 minutes. Your conversations stay on this device."
+            "No sign-up — you’ll be talking within seconds. Conversations are stored only on this device."
           ),
           React.createElement('button', {
             className: 'gate-dev-link',
@@ -1804,7 +1804,7 @@ Remember: you are holding space for two people to feel heard by each other. Your
           else if (ref && typeof ref.pause === 'function') ref.pause(); // HTMLAudioElement
         } catch(e) {}
         audioRef.current = null;
-        speechSynthesis.cancel();
+        try { window.speechSynthesis?.cancel(); } catch(e) {}
       };
 
       return { speak, speakStreaming, cancel, getLastError };
@@ -2096,8 +2096,14 @@ Remember: you are holding space for two people to feel heard by each other. Your
       };
 
       const sendToClaude = async (userText) => {
-        // A new turn supersedes any still-streaming previous one.
+        // A new turn supersedes any still-streaming previous one — kill its
+        // stream AND its audio. Aborting the fetch alone leaves the old
+        // reply's already-scheduled PCM chunks playing (and its speaker
+        // pumping) underneath the new reply's TTS: the "two voices at once"
+        // bug when a barge-in cancel was missed or the user talked over a
+        // reply that was still processing.
         streamAbortRef.current?.abort();
+        cancelSpeak();
         const ac = new AbortController();
         streamAbortRef.current = ac;
 
@@ -2110,6 +2116,7 @@ Remember: you are holding space for two people to feel heard by each other. Your
           ? [...prev.slice(0, -1), { role: 'user', content: `${last.content}\n${userText}` }]
           : [...prev, { role: 'user', content: userText }];
         setMessages(updated);
+        voiceStateRef.current = 'processing'; // keep the barge-in ref in lockstep
         setVoiceState('processing');
         setInterimText('');
 
@@ -2231,6 +2238,12 @@ Remember: you are holding space for two people to feel heard by each other. Your
                   if (fireChunk && fireChunk.length > 0) {
                     if (!streamSpeaker) {
                       streamSpeaker = speakStreaming();
+                      // Sync the ref before React re-renders: barge-in
+                      // (speech_started) reads voiceStateRef on the realtime
+                      // data channel and must see 'speaking' immediately —
+                      // the useEffect mirror lags a render, and a barge-in
+                      // in that window was silently ignored.
+                      voiceStateRef.current = 'speaking';
                       setVoiceState('speaking');
                       startedSpeaking = true;
                     }
@@ -2246,6 +2259,7 @@ Remember: you are holding space for two people to feel heard by each other. Your
           if (remaining.length > 0) {
             if (!streamSpeaker) {
               streamSpeaker = speakStreaming();
+              voiceStateRef.current = 'speaking'; // see comment above
               setVoiceState('speaking');
               startedSpeaking = true;
             }
@@ -2380,6 +2394,7 @@ Remember: you are holding space for two people to feel heard by each other. Your
             if (voiceStateRef.current === 'speaking') {
               streamAbortRef.current?.abort();
               cancelSpeak();
+              voiceStateRef.current = 'listening';
               setVoiceState('listening');
             }
           },
@@ -3106,7 +3121,7 @@ Remember: you are holding space for two people to feel heard by each other. Your
           // Version label
           React.createElement('p', {
             style: { textAlign: 'center', fontSize: '11px', color: '#555', margin: '12px 0 4px', opacity: 0.6 }
-          }, 'v2.4.4')
+          }, 'v2.4.5')
         )
       );
     };

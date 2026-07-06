@@ -37,7 +37,10 @@ export default async function handler(req) {
         // effort kept low so per-sentence streaming stays as snappy as the
         // old Sonnet 4 — Sonnet 4.6 otherwise defaults to high effort.
         model: 'claude-sonnet-4-6',
-        max_tokens: max_tokens || 1000,
+        // Clamp server-side: this endpoint is public and unauthenticated,
+        // and the app only ever needs short spoken replies — don't let
+        // arbitrary callers buy huge completions on our key.
+        max_tokens: Math.min(Number(max_tokens) || 1000, 1000),
         stream: true,
         thinking: { type: 'disabled' },
         output_config: { effort: 'low' },
