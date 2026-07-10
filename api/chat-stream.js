@@ -1,17 +1,8 @@
 export const config = { runtime: 'edge' };
 
+// Same-origin only: the app calls this with a relative URL, so no CORS
+// headers are sent — a wildcard made this a free cross-site Claude proxy.
 export default async function handler(req) {
-  if (req.method === 'OPTIONS') {
-    return new Response(null, {
-      status: 200,
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type',
-      },
-    });
-  }
-
   if (req.method !== 'POST') {
     return new Response(JSON.stringify({ error: 'Method not allowed' }), {
       status: 405,
@@ -37,7 +28,10 @@ export default async function handler(req) {
         // effort kept low so per-sentence streaming stays as snappy as the
         // old Sonnet 4 — Sonnet 4.6 otherwise defaults to high effort.
         model: 'claude-sonnet-4-6',
-        max_tokens: max_tokens || 1000,
+        // Clamp server-side: this endpoint is public and unauthenticated,
+        // and the app only ever needs short spoken replies — don't let
+        // arbitrary callers buy huge completions on our key.
+        max_tokens: Math.min(Number(max_tokens) || 1000, 1000),
         stream: true,
         thinking: { type: 'disabled' },
         output_config: { effort: 'low' },
@@ -110,7 +104,6 @@ export default async function handler(req) {
         'Cache-Control': 'no-cache, no-transform',
         'Connection': 'keep-alive',
         'X-Accel-Buffering': 'no',
-        'Access-Control-Allow-Origin': '*',
       },
     });
   } catch (error) {

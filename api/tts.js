@@ -1,17 +1,9 @@
 export const config = { runtime: 'edge' };
 
+// Same-origin only: the app always calls its own /api/* with relative
+// URLs, so no CORS headers are sent — a wildcard here just invited other
+// websites to spend our OpenAI quota from their visitors' browsers.
 export default async function handler(req) {
-  if (req.method === 'OPTIONS') {
-    return new Response(null, {
-      status: 200,
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type',
-      },
-    });
-  }
-
   if (req.method !== 'POST') {
     return new Response(JSON.stringify({ error: 'Method not allowed' }), {
       status: 405,
@@ -78,7 +70,6 @@ export default async function handler(req) {
       status: 200,
       headers: {
         'Content-Type': usePCM ? 'audio/pcm; rate=24000' : 'audio/mpeg',
-        'Access-Control-Allow-Origin': '*',
       },
     });
   } catch (error) {

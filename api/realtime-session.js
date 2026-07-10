@@ -7,18 +7,10 @@ export const config = { runtime: 'edge' };
 // pause and think without being cut off). The real API key never leaves
 // this function.
 
+// Same-origin only: the app calls this with a relative URL, so no CORS
+// headers are needed — and a wildcard would let any website mint realtime
+// client secrets (live STT minutes) on our OpenAI key.
 export default async function handler(req) {
-  if (req.method === 'OPTIONS') {
-    return new Response(null, {
-      status: 200,
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type',
-      },
-    });
-  }
-
   if (req.method !== 'POST') {
     return new Response(JSON.stringify({ error: 'Method not allowed' }), {
       status: 405,
@@ -76,10 +68,7 @@ export default async function handler(req) {
       JSON.stringify({ value: data.value, expires_at: data.expires_at }),
       {
         status: 200,
-        headers: {
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*',
-        },
+        headers: { 'Content-Type': 'application/json' },
       }
     );
   } catch (error) {

@@ -1,9 +1,11 @@
-const CACHE_NAME = 'feel-understood-v2.4.4';
+const CACHE_NAME = 'feel-understood-v2.5.0';
 const STATIC_ASSETS = [
   '/',
   '/index.html',
   '/styles.css',
   '/manifest.json',
+  '/vendor/react.production.min.js',
+  '/vendor/react-dom.production.min.js',
   '/images/logo-feel-understood.png',
   '/images/favicon-64.png',
   '/images/icon-192.png',
@@ -15,17 +17,11 @@ const STATIC_ASSETS = [
   '/images/icon-avatar.svg',
 ];
 
-const CDN_ASSETS = [
-  'https://unpkg.com/react@18/umd/react.production.min.js',
-  'https://unpkg.com/react-dom@18/umd/react-dom.production.min.js',
-  'https://unpkg.com/@babel/standalone/babel.min.js',
-];
-
-// Install: cache static assets
+// Install: cache static assets (React is vendored under /vendor — no CDN)
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) => {
-      return cache.addAll([...STATIC_ASSETS, ...CDN_ASSETS]);
+      return cache.addAll(STATIC_ASSETS);
     })
   );
   self.skipWaiting();

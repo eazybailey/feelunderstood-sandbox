@@ -1174,6 +1174,27 @@ html, body {
   background: var(--surface-2);
 }
 
+/* Voice replies on/off — small icon toggle beside New Chat */
+.voice-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  color: var(--accent-ink);
+  background: var(--accent-dim);
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+}
+.voice-toggle-btn:hover { background: rgba(var(--accent-rgb), 0.25); }
+.voice-toggle-btn.voice-toggle-muted {
+  color: var(--text-dim);
+  background: var(--surface-2);
+}
+
 .new-chat-btn {
   font-size: 13px;
   font-weight: 500;
@@ -1699,7 +1720,9 @@ html, body {
   border: 1px solid var(--surface-2);
   background: var(--bg);
   color: var(--text);
-  font-size: 14px;
+  /* 16px minimum: with pinch-zoom re-enabled, iOS auto-zooms the page
+     when focusing an input whose font is smaller than 16px. */
+  font-size: 16px;
   font-family: inherit;
   outline: none;
   transition: border-color 0.2s;
@@ -1709,6 +1732,16 @@ html, body {
 }
 .text-input::placeholder {
   color: var(--text-dim);
+}
+
+/* Version label under the controls — theme-aware (the old hardcoded
+   #555 was near-invisible against the dark theme). */
+.version-label {
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-dim);
+  margin: 12px 0 4px;
+  opacity: 0.7;
 }
 
 .send-btn {

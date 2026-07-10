@@ -6,8 +6,8 @@ A voice-first Progressive Web App for practicing better conversations through AI
 
 | Layer | Technology |
 |-------|-----------|
-| Frontend | React 18 (via CDN, no build step), Babel Standalone for JSX |
-| Backend | Vercel Functions — Edge Runtime (`chat-stream`, `tts`, `stt`) + Node.js (`chat`, legacy) |
+| Frontend | React 18.3.1 (vendored UMD builds in `/vendor` — no CDN, no build step; app code is plain `React.createElement`, no JSX/Babel) |
+| Backend | Vercel Functions — Edge Runtime (`chat-stream`, `tts`, `stt`, `realtime-session`) |
 | AI | Anthropic Claude API (claude-sonnet-4-6) |
 | TTS | OpenAI TTS API (`tts-1` model, `shimmer` voice) — streamed as raw PCM for gapless playback, MP3 fallback |
 | STT | **Primary**: OpenAI Realtime API over WebRTC (`gpt-4o-mini-transcribe`, server VAD, hands-free). Fallbacks: native Web Speech API (`SpeechRecognition`), then MediaRecorder → `/api/stt` (Whisper) |
@@ -19,12 +19,14 @@ A voice-first Progressive Web App for practicing better conversations through AI
 
 ```
 chatbot-demo/
-├── api/                       # Vercel serverless endpoints
-│   ├── chat.js               # Non-streaming Claude API (legacy, Node.js)
-│   ├── chat-stream.js        # Streaming Claude API (primary, Edge Runtime)
-│   ├── realtime-session.js   # Mints ephemeral OpenAI Realtime client secrets for hands-free STT (Edge Runtime)
-│   ├── tts.js                # OpenAI TTS endpoint — PCM streaming or MP3 (Edge Runtime)
-│   └── stt.js                # Speech-to-text endpoint — OpenAI Whisper, Groq fallback (Edge Runtime)
+├── api/                       # Vercel serverless endpoints (all Edge Runtime)
+│   ├── chat-stream.js        # Streaming Claude API (primary)
+│   ├── realtime-session.js   # Mints ephemeral OpenAI Realtime client secrets for hands-free STT
+│   ├── tts.js                # OpenAI TTS endpoint — PCM streaming or MP3
+│   └── stt.js                # Speech-to-text endpoint — OpenAI Whisper, Groq fallback
+├── vendor/                    # Vendored, pinned React 18.3.1 UMD builds (no CDN dependency)
+│   ├── react.production.min.js
+│   └── react-dom.production.min.js
 ├── images/                    # Icons, logos, doodle-style SVGs
 │   ├── favicon.svg
 │   ├── logo.svg
@@ -79,19 +81,20 @@ Hands-free:  IDLE → (tap mic) → LISTENING ⇄ PROCESSING ⇄ SPEAKING
 Tap-to-talk: IDLE → (tap mic) → LISTENING → PROCESSING → SPEAKING → IDLE
 ```
 
-Users interrupt during SPEAKING by just talking (hands-free) or tapping the mic (both paths).
+Users interrupt during SPEAKING by just talking (hands-free) or tapping the mic (both paths). A tap during SPEAKING flows straight into LISTENING when the realtime path is available (no second tap needed). A new user turn always hard-cancels any still-playing TTS (`cancelSpeak()` at the top of `sendToClaude`) so a superseded reply can never keep talking underneath the new one, and `voiceStateRef` is synced synchronously at every transition the barge-in handler reads (the `useEffect` mirror lags a render).
+
+**Voice replies toggle**: a header button (persisted as `fu_voice_muted`) turns TTS off entirely — replies stream as text only, the greeting renders silently, and muting mid-reply cancels playback immediately. STT/mic is unaffected.
 
 ### API Endpoints
 
 | Endpoint | Runtime | Purpose |
 |----------|---------|---------|
-| `POST /api/chat-stream` | Edge | Primary. Streams Claude responses as simplified SSE (`data: { text }`, then `data: [DONE]`). Sent unbuffered (`X-Accel-Buffering: no`, `no-transform`) so deltas arrive as produced |
+| `POST /api/chat-stream` | Edge | Primary. Streams Claude responses as simplified SSE (`data: { text }`, then `data: [DONE]`). Sent unbuffered (`X-Accel-Buffering: no`, `no-transform`) so deltas arrive as produced. Clamps client-supplied `max_tokens` to 1000 |
 | `POST /api/realtime-session` | Edge | Mints a short-lived (10 min) OpenAI Realtime client secret for a hands-free transcription session (server VAD, 1.2s end-of-turn). The browser then talks WebRTC directly to OpenAI |
 | `POST /api/tts` | Edge | Converts text → audio via OpenAI TTS: raw PCM stream (`format: 'pcm'`, primary) or MP3 (default). Aborts a slow upstream after 8s and returns a clean `504` so the client can retry |
 | `POST /api/stt` | Edge | Transcribes uploaded audio (tap-to-talk fallback path). Prefers OpenAI `gpt-4o-mini-transcribe`; falls back to Groq `whisper-large-v3-turbo` if only `GROQ_API_KEY` is set |
-| `POST /api/chat` | Node.js | Legacy non-streaming Claude call. Not actively used |
 
-All endpoints accept their respective bodies and return CORS headers for all origins.
+Endpoints are same-origin only — the app calls them with relative URLs, so no CORS headers are sent (a wildcard would offer the API keys' quota to any website). The legacy non-streaming `api/chat.js` was removed.
 
 ### Request Formats
 
@@ -127,7 +130,10 @@ Single-page React app rendered entirely in `index.html` (no build tooling).
 - `voiceState` — `'idle' | 'listening' | 'processing' | 'speaking'`
 - `interimText` / `transcribing` — real-time transcription preview / Whisper-path "transcribing" state
 - `textInput` — fallback text input value
+- `voiceMuted` — voice-replies-off toggle (persisted; TTS skipped, text still streams)
 - `error` — error message (voice failures persist ~10s; others auto-clear faster)
+
+Conversations are persisted to localStorage only once they contain a user message — greeting-only chats (every New Chat / mode switch) are not saved, so the history list stays clean.
 
 ## Coaching Framework
 
@@ -185,7 +191,7 @@ Hosted on **Vercel**. Config in `vercel.json`:
 ## PWA
 
 - Service Worker (`sw.js`) with cache name `feel-understood-v<app-version>` (bumped automatically per release — see Versioning)
-- Static assets + CDN libs cached on install
+- Static assets (including the vendored React builds) cached on install — fully offline-capable, no CDN
 - API calls always network-first, passed straight through (never cached/cloned, so streaming isn't buffered)
 - Offline fallback to cached `/index.html`
 - Installable to home screen (standalone display mode)
@@ -206,7 +212,7 @@ Key knobs and behaviors that keep the voice experience smooth (all in `index.htm
 
 ## Dependencies
 
-**Runtime**: None in package.json — React 18, ReactDOM 18, Babel loaded via CDN from unpkg.com
+**Runtime**: None in package.json — React 18.3.1 + ReactDOM 18.3.1 UMD builds are vendored in `/vendor` (pinned; refresh by extracting `umd/*.production.min.js` from the npm tarballs)
 
 **Dev**: `sharp@^0.34.5` (icon generation only)
 
@@ -244,5 +250,5 @@ Bump as part of any change you intend to deploy, then commit the result.
 - No build step — edit `index.html` and deploy
 - API functions in `api/` are auto-deployed as Vercel serverless functions
 - `scripts/generate-icons.mjs` regenerates PWA PNGs from `images/icon-app.svg` (run with `node scripts/generate-icons.mjs`)
-- Conversation history grows per session (`max_tokens` capped at 500 per response)
+- Conversation history grows per session (client asks for `max_tokens: 700` per response; the server clamps any request to 1000)
 - Original plan (`plan.md`) called for a separate `voice.html` and browser `SpeechSynthesis`/`SpeechRecognition` — the implementation diverged significantly (consolidated into a single `index.html`, OpenAI TTS + Whisper STT fallback, streaming pipeline). See `plan.md`'s status note for details.

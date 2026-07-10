@@ -1,11 +1,5 @@
 export const config = { runtime: 'edge' };
 
-const CORS = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type',
-};
-
 // Provider selection.
 // Prefer OpenAI (gpt-4o-mini-transcribe). Falls back to Groq
 // (whisper-large-v3-turbo) if only GROQ_API_KEY is set.
@@ -29,15 +23,13 @@ function pickProvider() {
   return null;
 }
 
+// Same-origin only: the app calls this with a relative URL, so no CORS
+// headers are sent — a wildcard just offered our STT quota to any site.
 export default async function handler(req) {
-  if (req.method === 'OPTIONS') {
-    return new Response(null, { status: 200, headers: CORS });
-  }
-
   if (req.method !== 'POST') {
     return new Response(JSON.stringify({ error: 'Method not allowed' }), {
       status: 405,
-      headers: { 'Content-Type': 'application/json', ...CORS },
+      headers: { 'Content-Type': 'application/json' },
     });
   }
 
@@ -45,7 +37,7 @@ export default async function handler(req) {
   if (!provider) {
     return new Response(JSON.stringify({ error: 'No STT provider configured' }), {
       status: 500,
-      headers: { 'Content-Type': 'application/json', ...CORS },
+      headers: { 'Content-Type': 'application/json' },
     });
   }
 
@@ -55,7 +47,7 @@ export default async function handler(req) {
     if (!audio || typeof audio === 'string') {
       return new Response(JSON.stringify({ error: 'No audio file provided' }), {
         status: 400,
-        headers: { 'Content-Type': 'application/json', ...CORS },
+        headers: { 'Content-Type': 'application/json' },
       });
     }
 
@@ -80,19 +72,19 @@ export default async function handler(req) {
       const err = await response.json().catch(() => ({}));
       return new Response(JSON.stringify({ error: err.error?.message || 'Transcription failed' }), {
         status: response.status,
-        headers: { 'Content-Type': 'application/json', ...CORS },
+        headers: { 'Content-Type': 'application/json' },
       });
     }
 
     const data = await response.json();
     return new Response(JSON.stringify({ text: (data.text || '').trim(), provider: provider.name }), {
       status: 200,
-      headers: { 'Content-Type': 'application/json', ...CORS },
+      headers: { 'Content-Type': 'application/json' },
     });
   } catch (error) {
     return new Response(JSON.stringify({ error: 'Internal server error' }), {
       status: 500,
-      headers: { 'Content-Type': 'application/json', ...CORS },
+      headers: { 'Content-Type': 'application/json' },
     });
   }
 }
