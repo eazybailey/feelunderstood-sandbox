@@ -42,10 +42,14 @@ export default async function handler(req) {
               // silence_duration_ms is the end-of-turn knob for the
               // hands-free path. 1200ms leaves room for a thoughtful
               // mid-sentence pause without feeling laggy at turn end.
+              // threshold 0.4 + 500ms prefix padding: VAD lags the true
+              // onset of soft speech, and only prefix_padding_ms of audio
+              // before the detection point reaches the transcriber — at
+              // 0.5/300 the first word or two of a turn was clipped.
               turn_detection: {
                 type: 'server_vad',
-                threshold: 0.5,
-                prefix_padding_ms: 300,
+                threshold: 0.4,
+                prefix_padding_ms: 500,
                 silence_duration_ms: 1200,
               },
               noise_reduction: { type: 'near_field' },
