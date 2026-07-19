@@ -1248,7 +1248,7 @@ Remember: you are holding space for two people to feel heard by each other. Your
       const pcRef = React.useRef(null);
       const dcRef = React.useRef(null);
       const streamRef = React.useRef(null);
-      const levelCtxRef = React.useRef(null);
+      const levelNodesRef = React.useRef(null);
       const levelAnimRef = React.useRef(null);
       const levelRef = React.useRef(0);
       const activeRef = React.useRef(false);
@@ -1260,7 +1260,10 @@ Remember: you are holding space for two people to feel heard by each other. Your
       const endSession = () => {
         activeRef.current = false;
         if (levelAnimRef.current) { cancelAnimationFrame(levelAnimRef.current); levelAnimRef.current = null; }
-        if (levelCtxRef.current) { try { levelCtxRef.current.close(); } catch (e) {} levelCtxRef.current = null; }
+        if (levelNodesRef.current) {
+          try { levelNodesRef.current.source.disconnect(); } catch (e) {}
+          levelNodesRef.current = null;
+        }
         if (dcRef.current) { try { dcRef.current.close(); } catch (e) {} dcRef.current = null; }
         if (pcRef.current) { try { pcRef.current.close(); } catch (e) {} pcRef.current = null; }
         if (streamRef.current) { streamRef.current.getTracks().forEach(t => t.stop()); streamRef.current = null; }
@@ -1270,6 +1273,13 @@ Remember: you are holding space for two people to feel heard by each other. Your
       React.useEffect(() => () => endSession(), []);
 
       const startSession = async ({ onInterim, onTurn, onSpeechStart, onError }) => {
+        // Mint the client secret WHILE the mic permission/device spins up —
+        // the two round-trips used to run back-to-back, and every extra
+        // moment before the session opens is a moment where the user's
+        // first words fall on a mic that isn't connected yet.
+        const tokenPromise = fetch('/api/realtime-session', { method: 'POST' })
+          .then(r => { if (!r.ok) throw new Error('mint-failed'); return r.json(); })
+          .catch(() => null);
         let stream;
         try {
           // Echo cancellation is what lets the mic stay open while TTS
@@ -1291,10 +1301,8 @@ Remember: you are holding space for two people to feel heard by each other. Your
         streamRef.current = stream;
 
         try {
-          const tokenRes = await fetch('/api/realtime-session', { method: 'POST' });
-          if (!tokenRes.ok) throw new Error('mint-failed');
-          const token = await tokenRes.json();
-          if (!token.value) throw new Error('mint-failed');
+          const token = await tokenPromise;
+          if (!token || !token.value) throw new Error('mint-failed');
 
           const pc = new RTCPeerConnection();
           pcRef.current = pc;
@@ -1356,17 +1364,21 @@ Remember: you are holding space for two people to feel heard by each other. Your
           };
 
           // Mic level for the visualizer — same "we can hear you"
-          // affordance as the Whisper path.
+          // affordance as the Whisper path. Taps into the SHARED playback
+          // AudioContext: a second live context running alongside TTS
+          // playback makes output audio glitch/crackle on some phones.
           try {
-            const AC = window.AudioContext || window.webkitAudioContext;
-            const ctx = new AC();
-            levelCtxRef.current = ctx;
+            ensureAudioContext();
+            const ctx = audioCtx;
+            if (!ctx || ctx.state !== 'running') throw new Error('no-ctx');
             const analyser = ctx.createAnalyser();
             analyser.fftSize = 1024;
-            ctx.createMediaStreamSource(stream).connect(analyser);
+            const source = ctx.createMediaStreamSource(stream);
+            source.connect(analyser);
+            levelNodesRef.current = { source, analyser };
             const buf = new Uint8Array(analyser.frequencyBinCount);
             const tick = () => {
-              if (!levelCtxRef.current) return;
+              if (!levelNodesRef.current) return;
               analyser.getByteTimeDomainData(buf);
               let sum = 0;
               for (let i = 0; i < buf.length; i++) {
@@ -1597,17 +1609,8 @@ Remember: you are holding space for two people to feel heard by each other. Your
       return result;
     };
 
-    // Raw PCM (24kHz 16-bit signed mono LE) → AudioBuffer. Used by the
-    // gapless streaming path, where audio plays as network chunks arrive.
+    // Raw TTS PCM is 24kHz 16-bit signed mono LE.
     const PCM_RATE = 24000;
-    const pcmToAudioBuffer = (bytes) => {
-      const samples = bytes.byteLength >> 1;
-      const buffer = audioCtx.createBuffer(1, samples, PCM_RATE);
-      const ch = buffer.getChannelData(0);
-      const view = new DataView(bytes.buffer, bytes.byteOffset, samples * 2);
-      for (let i = 0; i < samples; i++) ch[i] = view.getInt16(i * 2, true) / 32768;
-      return buffer;
-    };
 
     const useSpeechSynthesis = () => {
       const audioRef = React.useRef(null);
@@ -1677,6 +1680,59 @@ Remember: you are holding space for two people to feel heard by each other. Your
             }
           };
 
+          // Continuous 24kHz → context-rate resampler with interpolation
+          // state carried across network chunks. Buffers handed to the
+          // context are already at its native rate, so butt-joined sources
+          // play back sample-exact. The old approach (one 24kHz buffer per
+          // network chunk) let each BufferSource resample independently —
+          // the browser pads chunk edges with zeros while resampling, which
+          // put an audible click at EVERY chunk boundary: the "crackly
+          // line". The last input sample of each chunk is held back so the
+          // first output of the next chunk interpolates across the seam.
+          const outRate = audioCtx.sampleRate;
+          const step = PCM_RATE / outRate;
+          let pcmTail = new Float32Array(0);
+          let pcmPos = 0;
+
+          const resamplePCM = (int16) => {
+            const inBuf = new Float32Array(pcmTail.length + int16.length);
+            inBuf.set(pcmTail, 0);
+            for (let i = 0; i < int16.length; i++) inBuf[pcmTail.length + i] = int16[i] / 32768;
+            const out = [];
+            let t = pcmPos;
+            while (t < inBuf.length - 1) {
+              const i0 = t | 0;
+              const frac = t - i0;
+              out.push(inBuf[i0] + (inBuf[i0 + 1] - inBuf[i0]) * frac);
+              t += step;
+            }
+            const keepFrom = Math.min(t | 0, Math.max(inBuf.length - 1, 0));
+            pcmTail = inBuf.subarray(keepFrom);
+            pcmPos = t - keepFrom;
+            return Float32Array.from(out);
+          };
+
+          // Coalesce resampled audio into ≥40ms buffers before scheduling
+          // (except when flushing) — scheduling a source per tiny network
+          // chunk multiplies the seams and the main-thread work.
+          const MIN_SCHED = Math.round(outRate * 0.04);
+          let held = [];
+          let heldLen = 0;
+          const pushSamples = (f32, flush) => {
+            // A cancelled session must never schedule more audio — the
+            // barge-in cancel() already stopped everything on the timeline.
+            if (isStale()) { held = []; heldLen = 0; return; }
+            if (f32.length) { held.push(f32); heldLen += f32.length; }
+            if (!heldLen || (!flush && heldLen < MIN_SCHED)) return;
+            const joined = new Float32Array(heldLen);
+            let o = 0;
+            for (const a of held) { joined.set(a, o); o += a.length; }
+            held = []; heldLen = 0;
+            const buffer = audioCtx.createBuffer(1, joined.length, outRate);
+            buffer.getChannelData(0).set(joined);
+            scheduleChunk(buffer);
+          };
+
           const scheduleChunk = (audioBuffer) => {
             const src = audioCtx.createBufferSource();
             src.buffer = audioBuffer;
@@ -1689,8 +1745,11 @@ Remember: you are holding space for two people to feel heard by each other. Your
               maybeFinish();
             };
             // Butt each chunk up against the end of the previous one on the
-            // context clock — this is what makes playback seamless.
-            const at = Math.max(audioCtx.currentTime + 0.03, nextStartTime);
+            // context clock — this is what makes playback seamless. 60ms of
+            // headroom on a (re)start: with only 30ms, a busy main thread
+            // (React re-rendering on every stream delta) could miss the
+            // start time and clip the front of the chunk.
+            const at = Math.max(audioCtx.currentTime + 0.06, nextStartTime);
             src.start(at);
             nextStartTime = at + audioBuffer.duration;
           };
@@ -1719,12 +1778,22 @@ Remember: you are holding space for two people to feel heard by each other. Your
                   // Only whole 16-bit samples; carry odd trailing byte over.
                   const usable = bytes.length & ~1;
                   leftover = bytes.subarray(usable);
-                  if (usable >= 2) scheduleChunk(pcmToAudioBuffer(bytes.subarray(0, usable)));
+                  if (usable >= 2) {
+                    const view = new DataView(bytes.buffer, bytes.byteOffset, usable);
+                    const int16 = new Int16Array(usable >> 1);
+                    for (let i = 0; i < int16.length; i++) int16[i] = view.getInt16(i * 2, true);
+                    pushSamples(resamplePCM(int16), false);
+                  }
                 }
+                // Sentence over: a single zero sample releases the held-back
+                // tail sample from the resampler (fading the seam to
+                // silence), then flush whatever is coalesced.
+                pushSamples(resamplePCM(new Int16Array(1)), true);
               } catch (e) {
                 // One failed sentence must not silence the rest.
                 console.error('Stream TTS chunk error:', e);
                 lastErrorRef.current = e?.message || String(e);
+                pushSamples(new Float32Array(0), true);
               }
               streamIndex++;
             }
@@ -2007,6 +2076,10 @@ Remember: you are holding space for two people to feel heard by each other. Your
       const [handsFree, setHandsFree] = React.useState(false);
       const handsFreeRef = React.useRef(false);
       const realtimeEnabledRef = React.useRef(true);
+      // True while the realtime session is being (re)built — the mic isn't
+      // actually hearing anything yet, and the status label must say so
+      // instead of claiming "Listening" while first words fall into a void.
+      const [rtConnecting, setRtConnecting] = React.useState(false);
       // Mirror of voiceState for realtime event callbacks, which outlive
       // any single render.
       const voiceStateRef = React.useRef('idle');
@@ -2410,34 +2483,39 @@ Remember: you are holding space for two people to feel heard by each other. Your
       };
 
       const openRealtimeSession = async () => {
-        const ok = await realtime.startSession({
-          onInterim: (t) => {
-            if (handsFreeRef.current) setInterimText(t);
-          },
-          onTurn: (text) => {
-            if (!handsFreeRef.current) return;
-            reconnectAttemptsRef.current = 0; // healthy session — reset budget
-            setInterimText('');
-            sendToClaude(text);
-            if (Date.now() - sessionStartedAtRef.current > SESSION_ROTATE_MS) {
-              cycleRealtimeSession();
-            }
-          },
-          onSpeechStart: () => {
-            if (!handsFreeRef.current) return;
-            // Barge-in: the user started talking over the assistant — stop
-            // the reply (audio and stream) and listen. No tap needed.
-            if (voiceStateRef.current === 'speaking') {
-              streamAbortRef.current?.abort();
-              cancelSpeak();
-              voiceStateRef.current = 'listening';
-              setVoiceState('listening');
-            }
-          },
-          onError: handleRealtimeError,
-        });
-        if (ok) sessionStartedAtRef.current = Date.now();
-        return ok;
+        setRtConnecting(true);
+        try {
+          const ok = await realtime.startSession({
+            onInterim: (t) => {
+              if (handsFreeRef.current) setInterimText(t);
+            },
+            onTurn: (text) => {
+              if (!handsFreeRef.current) return;
+              reconnectAttemptsRef.current = 0; // healthy session — reset budget
+              setInterimText('');
+              sendToClaude(text);
+              if (Date.now() - sessionStartedAtRef.current > SESSION_ROTATE_MS) {
+                cycleRealtimeSession();
+              }
+            },
+            onSpeechStart: () => {
+              if (!handsFreeRef.current) return;
+              // Barge-in: the user started talking over the assistant — stop
+              // the reply (audio and stream) and listen. No tap needed.
+              if (voiceStateRef.current === 'speaking') {
+                streamAbortRef.current?.abort();
+                cancelSpeak();
+                voiceStateRef.current = 'listening';
+                setVoiceState('listening');
+              }
+            },
+            onError: handleRealtimeError,
+          });
+          if (ok) sessionStartedAtRef.current = Date.now();
+          return ok;
+        } finally {
+          setRtConnecting(false);
+        }
       };
       openSessionRef.current = openRealtimeSession;
 
@@ -2704,7 +2782,7 @@ Remember: you are holding space for two people to feel heard by each other. Your
       const statusLabel = handsFree
         ? {
             idle: 'Tap to talk',
-            listening: 'Listening — just talk · tap to end',
+            listening: rtConnecting ? 'Connecting…' : 'Listening — just talk · tap to end',
             processing: 'Thinking...',
             speaking: 'Talk to interrupt',
           }[voiceState]
@@ -3179,7 +3257,7 @@ Remember: you are holding space for two people to feel heard by each other. Your
           ),
 
           // Version label
-          React.createElement('p', { className: 'version-label' }, 'v2.5.0')
+          React.createElement('p', { className: 'version-label' }, 'v2.5.1')
         )
       );
     };
