@@ -1,7 +1,10 @@
-const CACHE_NAME = 'feel-understood-v2.5.2';
+const CACHE_NAME = 'feel-understood-v2.5.3';
+// Note: no '/index.html' entry — vercel.json's cleanUrls answers it with a
+// 308 redirect to '/', and a cached redirected response served to a
+// navigation is rejected by browsers as a network error. '/' carries the
+// same content without the redirect.
 const STATIC_ASSETS = [
   '/',
-  '/index.html',
   '/styles.css',
   '/manifest.json',
   '/vendor/react.production.min.js',
@@ -59,9 +62,9 @@ self.addEventListener('fetch', (event) => {
         return response;
       });
     }).catch(() => {
-      // Offline fallback for navigation
+      // Offline fallback for navigation — serve the precached app shell
       if (request.mode === 'navigate') {
-        return caches.match('/index.html');
+        return caches.match('/');
       }
     })
   );

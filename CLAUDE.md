@@ -193,7 +193,7 @@ Hosted on **Vercel**. Config in `vercel.json`:
 - Service Worker (`sw.js`) with cache name `feel-understood-v<app-version>` (bumped automatically per release — see Versioning)
 - Static assets (including the vendored React builds) cached on install — fully offline-capable, no CDN
 - API calls always network-first, passed straight through (never cached/cloned, so streaming isn't buffered)
-- Offline fallback to cached `/index.html`
+- Offline fallback to cached `/` (not `/index.html` — `cleanUrls` 308-redirects it, and a cached redirected response is rejected for navigations)
 - Installable to home screen (standalone display mode)
 
 ## Voice Reliability & Tuning
@@ -203,7 +203,7 @@ Key knobs and behaviors that keep the voice experience smooth (all in `index.htm
 - **End-of-turn silence (hands-free)**: `silence_duration_ms: 1200` in `api/realtime-session.js` — server-VAD pause length before a turn ends. The dominant latency knob on the primary path: lower = snappier turn-taking, higher = more room to pause and think mid-sentence.
 - **End-of-turn silence (tap-to-talk)**: `SILENCE_MS = 2200` in both fallback STT paths — how long to wait through a pause before treating the user as done. Tap the mic to end immediately.
 - **Barge-in**: while the assistant speaks, `input_audio_buffer.speech_started` aborts the reply stream and playback. Relies on `echoCancellation: true` so the mic doesn't hear the assistant's own voice — verify on speakerphone-style devices.
-- **Self-healing hands-free session**: a dropped WebRTC session (screen off, app switch, network blip, upstream expiry) is rebuilt silently — up to 3 reconnect attempts (budget resets on each successful turn), a rebuild-on-return `visibilitychange` handler for backgrounded PWAs, and proactive rotation of sessions older than 8 min at turn-capture time. Only hard failures (permission denied, no mic, setup rejected) fall back to tap-to-talk.
+- **Self-healing hands-free session**: a dropped WebRTC session (screen off, app switch, network blip, upstream expiry) is rebuilt silently — up to 3 reconnect attempts with short backoff (budget refills on each successful turn and 30s after a healthy rebuild), a rebuild-on-return `visibilitychange` handler for backgrounded PWAs, a transient-`disconnected` grace period before tearing down, mic-track death detection (phone call/Siri), and proactive rotation of sessions older than 8 min at turn-capture time. Session setup is generation-guarded (single-flight): cancelling mid-connect can't leave a ghost hot-mic session, and a rebuild can't double-open. Only mic-level failures (permission denied, no mic) or an exhausted retry budget fall back to tap-to-talk.
 - **TTS model**: `tts-1` (not `tts-1-hd`) in `api/tts.js` — much faster to generate, which matters for per-sentence streaming on an edge function.
 - **TTS timeout**: `api/tts.js` aborts a slow OpenAI call after 8s → clean `504`, so the client retry fires fast instead of waiting for the platform gateway.
 - **TTS retry**: `fetchTTSBuffer` (MP3 path) and `fetchPCMStream` (PCM streaming path) both retry once on `429` (rate limit, longer backoff) or `5xx`/network errors. Other `4xx` are not retried.
