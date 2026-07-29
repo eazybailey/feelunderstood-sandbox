@@ -232,7 +232,7 @@ USER PROFILE:
 - Name: ${profile.name || 'friend'}
 - Chosen path: ${goalMap[profile.goal] || 'general exploration of how to feel more understood'}
 
-IMPORTANT: This user came straight to the conversation without filling in a questionnaire. In your very first message, warmly greet them by name and invite them directly into whatever conversation or situation matters to them right now. Use their name occasionally but not in every message.`;
+IMPORTANT: This user came straight to the conversation without filling in a questionnaire. The app has already greeted them for you: it introduced you as their conversation coach and explained what you can do — talk through an upcoming or past conversation, practice what to say (including role-playing the other person), or simply listen so they feel properly heard. Do NOT introduce yourself or list your capabilities again. Meet their first message right where it lands: respond warmly to whatever they brought, and if they seem unsure where to start, help them pick one concrete starting point. Use their name occasionally but not in every message.`;
       }
 
       const profileContext = `
@@ -340,12 +340,25 @@ Remember: you are holding space for two people to feel heard by each other. Your
       return buildCoachGreeting(profile);
     };
 
+    // Intro for users who skipped the questionnaire (the Beta path): the
+    // coach introduces itself and what it can do, instead of assuming the
+    // user already has a conversation in mind.
+    const buildBetaIntroGreeting = (name) => {
+      return `Hi ${name}, welcome \u2014 I\u2019m your conversation coach. I help people with the conversations that matter to them. We can talk through a tricky one you\u2019ve got coming up, unpack one that didn\u2019t go the way you hoped, or practice what you want to say \u2014 I can even play the other person so you can try it out loud. And if you\u2019d simply like to talk something through and feel properly heard, that works too. So \u2014 what\u2019s on your mind today?`;
+    };
+
     const buildCoachGreeting = (profile) => {
-      if (!profile) {
-        return "Hey, welcome \u2014 I\u2019m your conversation coach. Think of someone important to you who you\u2019d like better conversations with \u2014 the kind where you both feel heard and understood. Who comes to mind, and what gets in the way?";
-      }
+      if (!profile) return buildBetaIntroGreeting('there');
 
       const name = profile.name || 'friend';
+
+      // Beta onboarding skips the questionnaire \u2014 those users arrive with
+      // no context, so introduce the coach and its capabilities first.
+      const fu = profile.feelUnderstood || {};
+      const hasQuestionnaire =
+        Object.values(fu.areas || {}).some(v => typeof v === 'number') ||
+        (fu.aspects || []).length > 0 || !!fu.blame;
+      if (!hasQuestionnaire) return buildBetaIntroGreeting(name);
 
       return `Hi ${name}, I\u2019m really glad you\u2019re here. Think of someone important to you who you\u2019d like better conversations with \u2014 the kind where you both feel heard and understood. Who comes to mind, and what gets in the way?`;
     };
@@ -3257,7 +3270,7 @@ Remember: you are holding space for two people to feel heard by each other. Your
           ),
 
           // Version label
-          React.createElement('p', { className: 'version-label' }, 'v2.5.1')
+          React.createElement('p', { className: 'version-label' }, 'v2.5.2')
         )
       );
     };
