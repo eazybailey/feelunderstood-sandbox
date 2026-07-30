@@ -1486,6 +1486,13 @@ html, body {
   color: var(--red-ink);
   background: rgba(var(--red-rgb), 0.1);
 }
+/* Touch devices have no hover: an opacity-0 button was invisible yet still
+   tappable — undiscoverable at best, an accidental delete at worst. */
+@media (hover: none) {
+  .history-item-delete {
+    opacity: 0.6;
+  }
+}
 
 .history-footer {
   padding: 12px 16px calc(12px + var(--safe-bottom));
@@ -2429,6 +2436,7 @@ html, body {
 
 /* ── Landing Gate (Beta vs Full) ── */
 .gate-screen {
+  min-height: 100vh; /* fallback for browsers without dvh */
   min-height: 100dvh;
   display: flex;
   align-items: center;

@@ -85,11 +85,21 @@ export default async function handler(req) {
               if (parsed.type === 'message_stop') {
                 await writer.write(encoder.encode(`data: [DONE]\n\n`));
               }
+              // Anthropic can 200 and then load-shed with an in-stream
+              // error event — forward it so the client can show a real
+              // error instead of a silent empty/truncated reply.
+              if (parsed.type === 'error') {
+                await writer.write(encoder.encode(`data: ${JSON.stringify({ error: parsed.error?.message || 'Upstream stream error' })}\n\n`));
+              }
             } catch (e) {}
           }
         }
         await writer.write(encoder.encode(`data: [DONE]\n\n`));
-      } catch (e) {}
+      } catch (e) {
+        try {
+          await writer.write(encoder.encode(`data: ${JSON.stringify({ error: 'Upstream connection lost' })}\n\n`));
+        } catch (e2) {}
+      }
       await writer.close();
     })();
 

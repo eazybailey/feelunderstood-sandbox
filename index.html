@@ -73,6 +73,11 @@
     const deleteConversation = (id) => {
       const all = loadConversations().filter(c => c.id !== id);
       saveToStorage(STORAGE_KEYS.conversations, all);
+      // A stale active pointer at a deleted conversation would dead-end the
+      // next load back into onboarding.
+      if (loadFromStorage(STORAGE_KEYS.activeId, null) === id) {
+        saveToStorage(STORAGE_KEYS.activeId, null);
+      }
       return all;
     };
 
@@ -942,9 +947,25 @@ Remember: you are holding space for two people to feel heard by each other. Your
         let silenceTimer = null;
         let committed = false;
 
+        // In-app iOS browsers (Instagram/Gmail/Slack WKWebViews) and Chrome
+        // on iPad expose SpeechRecognition, but start() silently does
+        // nothing — no result, no error, no end. Without a watchdog the UI
+        // would sit at "Listening..." forever; any real engine fires
+        // onstart/onaudiostart immediately, which disarms it.
+        let watchdog = setTimeout(() => {
+          watchdog = null;
+          if (committed) return;
+          abandon();
+          onError('start-failed');
+        }, 8000);
+        const feedWatchdog = () => {
+          if (watchdog) { clearTimeout(watchdog); watchdog = null; }
+        };
+
         const commit = () => {
           if (committed) return;
           committed = true;
+          feedWatchdog();
           if (silenceTimer) { clearTimeout(silenceTimer); silenceTimer = null; }
           const finalText = (accumulatedFinal + ' ' + lastInterim).trim();
           try { r.stop(); } catch(e) {}
@@ -961,13 +982,18 @@ Remember: you are holding space for two people to feel heard by each other. Your
           // user switches to typing or leaves the conversation mid-listen.
           if (committed) return;
           committed = true;
+          feedWatchdog();
           if (silenceTimer) { clearTimeout(silenceTimer); silenceTimer = null; }
           try { r.abort(); } catch(e) {}
         };
 
         sessionRef.current = { commit, abandon };
 
+        r.onstart = feedWatchdog;
+        r.onaudiostart = feedWatchdog;
+        r.onspeechstart = feedWatchdog;
         r.onresult = (e) => {
+          feedWatchdog();
           // Rebuild the transcript from the full results list on every
           // event instead of appending deltas. Chrome on Android sometimes
           // re-delivers final results (resultIndex doesn't reliably
@@ -997,6 +1023,7 @@ Remember: you are holding space for two people to feel heard by each other. Your
           resetSilenceTimer();
         };
         r.onerror = (e) => {
+          feedWatchdog();
           if (e.error === 'no-speech' || e.error === 'aborted') return;
           onError(e.error);
         };
@@ -1049,6 +1076,11 @@ Remember: you are holding space for two people to feel heard by each other. Your
       // Last computed RMS level [0..1ish] — read by WaveVisualizer for
       // live "we can hear you" feedback during recording.
       const levelRef = React.useRef(0);
+      // Bumped by stop()/abort() so a start() still awaiting the
+      // getUserMedia permission prompt knows it was cancelled — otherwise
+      // tapping the mic off while the sheet is up, then granting, left a
+      // zombie recorder running while the UI showed "Tap to talk".
+      const startTokenRef = React.useRef(0);
 
       React.useEffect(() => {
         if (!navigator.mediaDevices?.getUserMedia || typeof window.MediaRecorder === 'undefined') {
@@ -1083,6 +1115,7 @@ Remember: you are holding space for two people to feel heard by each other. Your
         onFinalRef.current = onFinal;
         onErrorRef.current = onError;
         onProcessingRef.current = onProcessing || null;
+        const myToken = ++startTokenRef.current;
 
         let stream;
         try {
@@ -1098,6 +1131,13 @@ Remember: you are holding space for two people to feel heard by each other. Your
           }
           return;
         }
+        // Cancelled while the permission prompt was up — release the mic
+        // instead of recording behind an idle UI.
+        if (startTokenRef.current !== myToken) {
+          stream.getTracks().forEach(t => t.stop());
+          return;
+        }
+        cleanup(); // stop any orphaned previous stream before adopting a new one
         streamRef.current = stream;
 
         const mime = pickMime();
@@ -1115,7 +1155,13 @@ Remember: you are holding space for two people to feel heard by each other. Your
         startedAtRef.current = Date.now();
 
         rec.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunksRef.current.push(e.data); };
-        rec.onerror = () => onErrorRef.current && onErrorRef.current('recorder-failed');
+        rec.onerror = () => {
+          // A recorder error may never be followed by onstop — release the
+          // mic here or it stays hot behind an error banner.
+          rec.onstop = null;
+          cleanup();
+          onErrorRef.current && onErrorRef.current('recorder-failed');
+        };
         rec.onstop = async () => {
           const chunks = chunksRef.current;
           chunksRef.current = [];
@@ -1134,10 +1180,15 @@ Remember: you are holding space for two people to feel heard by each other. Your
 
           if (onProcessingRef.current) onProcessingRef.current();
 
+          // Time-box the upload: while it's in flight the whole UI is in
+          // 'processing' (mic taps ignored), so a stalled request on flaky
+          // mobile networks must not lock the app for minutes.
+          const uploadAC = new AbortController();
+          const uploadTimer = setTimeout(() => uploadAC.abort(), 20000);
           try {
             const fd = new FormData();
             fd.append('audio', blob, `audio.${ext}`);
-            const res = await fetch('/api/stt', { method: 'POST', body: fd });
+            const res = await fetch('/api/stt', { method: 'POST', body: fd, signal: uploadAC.signal });
             if (!res.ok) {
               const err = await res.json().catch(() => ({}));
               onErrorRef.current && onErrorRef.current(err.error || 'stt-failed');
@@ -1146,7 +1197,9 @@ Remember: you are holding space for two people to feel heard by each other. Your
             const data = await res.json();
             onFinalRef.current && onFinalRef.current((data.text || '').trim());
           } catch (e) {
-            onErrorRef.current && onErrorRef.current(e?.message || 'stt-failed');
+            onErrorRef.current && onErrorRef.current('stt-failed');
+          } finally {
+            clearTimeout(uploadTimer);
           }
         };
 
@@ -1214,6 +1267,7 @@ Remember: you are holding space for two people to feel heard by each other. Your
         if (rec && rec.state !== 'inactive') {
           try { rec.stop(); } catch (e) {}
         } else {
+          startTokenRef.current++; // cancel a start() still awaiting the mic
           cleanup();
           onFinalRef.current && onFinalRef.current('');
         }
@@ -1228,6 +1282,7 @@ Remember: you are holding space for two people to feel heard by each other. Your
           rec.onstop = () => { chunksRef.current = []; cleanup(); };
           try { rec.stop(); } catch (e) { cleanup(); }
         } else {
+          startTokenRef.current++; // cancel a start() still awaiting the mic
           cleanup();
         }
       };
@@ -1265,12 +1320,20 @@ Remember: you are holding space for two people to feel heard by each other. Your
       const levelAnimRef = React.useRef(null);
       const levelRef = React.useRef(0);
       const activeRef = React.useRef(false);
+      // Generation counter: endSession bumps it, and every await inside
+      // startSession re-checks it. Without this, ending hands-free while
+      // setup was mid-flight (permission prompt up, SDP exchange slow) let
+      // the pending startSession finish as an untracked ghost session — a
+      // hot mic behind an idle UI, and doubled transcriptions once a second
+      // session was opened on top of it.
+      const genRef = React.useRef(0);
 
       const supported = typeof window !== 'undefined'
         && !!window.RTCPeerConnection
         && !!navigator.mediaDevices?.getUserMedia;
 
       const endSession = () => {
+        genRef.current++;
         activeRef.current = false;
         if (levelAnimRef.current) { cancelAnimationFrame(levelAnimRef.current); levelAnimRef.current = null; }
         if (levelNodesRef.current) {
@@ -1285,14 +1348,23 @@ Remember: you are holding space for two people to feel heard by each other. Your
 
       React.useEffect(() => () => endSession(), []);
 
-      const startSession = async ({ onInterim, onTurn, onSpeechStart, onError }) => {
+      const mintSecret = () => fetch('/api/realtime-session', { method: 'POST' })
+        .then(r => { if (!r.ok) throw new Error('mint-failed'); return r.json(); })
+        .catch(() => null);
+
+      const startSession = async ({ onInterim, onTurn, onSpeechStart, onSpeechStop, onError }) => {
+        // Tear down any previous session first — overwriting the refs would
+        // leak its mic tracks and peer connection — then claim a generation
+        // so a concurrent endSession/startSession cancels this one.
+        endSession();
+        const myGen = genRef.current;
+        const cancelled = () => genRef.current !== myGen;
+
         // Mint the client secret WHILE the mic permission/device spins up —
         // the two round-trips used to run back-to-back, and every extra
         // moment before the session opens is a moment where the user's
         // first words fall on a mic that isn't connected yet.
-        const tokenPromise = fetch('/api/realtime-session', { method: 'POST' })
-          .then(r => { if (!r.ok) throw new Error('mint-failed'); return r.json(); })
-          .catch(() => null);
+        const tokenPromise = mintSecret();
         let stream;
         try {
           // Echo cancellation is what lets the mic stay open while TTS
@@ -1302,6 +1374,7 @@ Remember: you are holding space for two people to feel heard by each other. Your
           });
         } catch (e) {
           const name = e?.name || '';
+          if (cancelled()) return false;
           if (name === 'NotAllowedError' || name === 'SecurityError' || name === 'PermissionDeniedError') {
             onError('not-allowed');
           } else if (name === 'NotFoundError' || name === 'OverconstrainedError') {
@@ -1311,13 +1384,32 @@ Remember: you are holding space for two people to feel heard by each other. Your
           }
           return false;
         }
+        if (cancelled()) {
+          stream.getTracks().forEach(t => t.stop());
+          return false;
+        }
         streamRef.current = stream;
+        // The OS can take the mic (phone call, Siri) while the peer
+        // connection stays 'connected' — surface it so the session rebuilds
+        // instead of listening forever on a dead track.
+        stream.getTracks().forEach(t => {
+          t.onended = () => { if (!cancelled() && activeRef.current) onError('connection-lost'); };
+        });
 
+        let pc = null;
         try {
-          const token = await tokenPromise;
+          let token = await tokenPromise;
+          if (cancelled()) throw new Error('cancelled');
           if (!token || !token.value) throw new Error('mint-failed');
+          // A permission prompt can outlive the 10-minute secret — re-mint
+          // rather than opening with a token that the SDP exchange rejects.
+          if (token.expires_at && token.expires_at * 1000 < Date.now() + 10000) {
+            token = await mintSecret();
+            if (cancelled()) throw new Error('cancelled');
+            if (!token || !token.value) throw new Error('mint-failed');
+          }
 
-          const pc = new RTCPeerConnection();
+          pc = new RTCPeerConnection();
           pcRef.current = pc;
           stream.getTracks().forEach(t => pc.addTrack(t, stream));
 
@@ -1325,6 +1417,7 @@ Remember: you are holding space for two people to feel heard by each other. Your
           dcRef.current = dc;
           let interim = '';
           dc.onmessage = (e) => {
+            if (cancelled()) return;
             let msg;
             try { msg = JSON.parse(e.data); } catch (err) { return; }
             if (msg.type === 'input_audio_buffer.speech_started') {
@@ -1334,15 +1427,24 @@ Remember: you are holding space for two people to feel heard by each other. Your
               if (interim.trim()) onInterim(interim.trim());
             } else if (msg.type === 'conversation.item.input_audio_transcription.completed') {
               interim = '';
+              if (onSpeechStop) onSpeechStop();
               const text = (msg.transcript || '').trim();
               if (text) onTurn(text);
               else onInterim('');
+            } else if (msg.type === 'conversation.item.input_audio_transcription.failed') {
+              // Without this branch a failed transcription left the stale
+              // interim bubble on screen and the next turn's deltas were
+              // appended onto the dead text.
+              interim = '';
+              if (onSpeechStop) onSpeechStop();
+              onInterim('');
             } else if (msg.type === 'error') {
               onError(msg.error?.message || 'realtime-error');
             }
           };
 
           const offer = await pc.createOffer();
+          if (cancelled()) throw new Error('cancelled');
           await pc.setLocalDescription(offer);
           const sdpRes = await fetch('https://api.openai.com/v1/realtime/calls', {
             method: 'POST',
@@ -1352,8 +1454,10 @@ Remember: you are holding space for two people to feel heard by each other. Your
             },
             body: offer.sdp,
           });
+          if (cancelled()) throw new Error('cancelled');
           if (!sdpRes.ok) throw new Error('sdp-failed');
           const answerSdp = await sdpRes.text();
+          if (cancelled()) throw new Error('cancelled');
           await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
 
           await new Promise((resolve, reject) => {
@@ -1366,13 +1470,31 @@ Remember: you are holding space for two people to feel heard by each other. Your
               }
             };
           });
+          if (cancelled()) throw new Error('cancelled');
 
           // After setup, surface a dropped connection as an error so the
-          // app can fall back instead of listening to a dead session.
+          // app can rebuild instead of listening to a dead session.
+          // 'disconnected' is transient in WebRTC (wifi→cellular handover,
+          // brief packet loss) and usually recovers on its own — give it a
+          // grace period instead of tearing down mid-utterance.
+          let disconnectTimer = null;
           pc.onconnectionstatechange = () => {
-            if (!activeRef.current) return;
-            if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+            if (cancelled() || !activeRef.current) return;
+            const st = pc.connectionState;
+            if (st === 'failed') {
               onError('connection-lost');
+            } else if (st === 'disconnected') {
+              if (!disconnectTimer) {
+                disconnectTimer = setTimeout(() => {
+                  disconnectTimer = null;
+                  if (!cancelled() && activeRef.current && pc.connectionState !== 'connected') {
+                    onError('connection-lost');
+                  }
+                }, 4000);
+              }
+            } else if (st === 'connected' && disconnectTimer) {
+              clearTimeout(disconnectTimer);
+              disconnectTimer = null;
             }
           };
 
@@ -1407,16 +1529,32 @@ Remember: you are holding space for two people to feel heard by each other. Your
           activeRef.current = true;
           return true;
         } catch (e) {
+          if (cancelled() || e?.message === 'cancelled') {
+            // A newer session owns the shared refs (or endSession already
+            // cleaned them) — dispose only what this attempt created.
+            try { if (pc) pc.close(); } catch (err) {}
+            stream.getTracks().forEach(t => t.stop());
+            return false;
+          }
           endSession();
           onError(e?.message === 'mint-failed' ? 'realtime-unavailable' : 'realtime-failed');
           return false;
         }
       };
 
-      const isActive = () => activeRef.current;
+      // Active only counts if the mic track is actually alive — the OS can
+      // kill the track without touching the peer connection.
+      const isActive = () => activeRef.current
+        && !!streamRef.current
+        && streamRef.current.getAudioTracks().some(t => t.readyState === 'live');
       const getLevel = () => levelRef.current;
+      // Drop any audio captured but not yet transcribed — used when a typed
+      // message supersedes a half-spoken one.
+      const clearInput = () => {
+        try { dcRef.current?.send(JSON.stringify({ type: 'input_audio_buffer.clear' })); } catch (e) {}
+      };
 
-      return { supported, startSession, endSession, isActive, getLevel };
+      return { supported, startSession, endSession, isActive, getLevel, clearInput };
     };
 
     // ── Browser detection: which STT path to use ──
@@ -1458,15 +1596,19 @@ Remember: you are holding space for two people to feel heard by each other. Your
     let audioCtx = null;
     let audioCtxReady = false;
 
-    // Called on every user interaction to ensure AudioContext is alive
+    // Called on every user interaction to ensure AudioContext is alive.
+    // The resume gate is "not running" rather than === 'suspended': iOS
+    // WebKit parks the context in a nonstandard 'interrupted' state after a
+    // phone call / Siri / screen lock, and a context left there would mute
+    // every reply for the rest of the visit with no error shown.
     const ensureAudioContext = () => {
       try {
         if (!audioCtx) {
           const AC = window.AudioContext || window.webkitAudioContext;
           if (AC) audioCtx = new AC();
         }
-        if (audioCtx && audioCtx.state === 'suspended') {
-          audioCtx.resume();
+        if (audioCtx && audioCtx.state !== 'running' && audioCtx.state !== 'closed') {
+          audioCtx.resume().catch(() => {});
         }
         if (audioCtx && audioCtx.state !== 'closed') {
           audioCtxReady = true;
@@ -1476,10 +1618,14 @@ Remember: you are holding space for two people to feel heard by each other. Your
       }
     };
 
-    // Listen on EVERY tap — AudioContext can get suspended by iOS at any time
+    // Listen on EVERY tap — AudioContext can get suspended by iOS at any
+    // time — and on return to the foreground, which is when an
+    // interruption (call/Siri/lock) is over and the context can recover
+    // without waiting for a tap that hands-free users never make.
     document.addEventListener('touchstart', ensureAudioContext, true);
     document.addEventListener('touchend', ensureAudioContext, true);
     document.addEventListener('click', ensureAudioContext, true);
+    document.addEventListener('visibilitychange', ensureAudioContext, true);
 
     // Fetches TTS audio as ArrayBuffer. On failure, throws an Error whose
     // message contains the server's JSON error body so the real cause
@@ -1545,19 +1691,24 @@ Remember: you are holding space for two people to feel heard by each other. Your
     };
 
     // Plays an ArrayBuffer of audio through AudioContext (primary)
-    // or falls back to HTMLAudioElement
-    const playAudioBuffer = (arrayBuffer, audioRef) => {
-      return new Promise(async (resolve) => {
-        // Ensure context is resumed (may have been suspended during idle)
-        if (audioCtx && audioCtx.state === 'suspended') {
+    // or falls back to HTMLAudioElement. isStale (optional) is re-checked
+    // after every await so a barge-in that lands mid-decode can't start a
+    // superseded sentence on top of the new turn.
+    const playAudioBuffer = (arrayBuffer, audioRef, isStale) => {
+      return new Promise(async (resolve, reject) => {
+        // Ensure context is resumed (may have been suspended — or
+        // 'interrupted' on iOS — during idle)
+        if (audioCtx && audioCtx.state !== 'running' && audioCtx.state !== 'closed') {
           try { await audioCtx.resume(); } catch(e) {}
         }
+        if (isStale && isStale()) return resolve();
 
         // ── Primary: AudioContext ──
         if (audioCtx && audioCtx.state === 'running') {
           try {
             // .slice(0) because decodeAudioData detaches the buffer
             const decoded = await audioCtx.decodeAudioData(arrayBuffer.slice(0));
+            if (isStale && isStale()) return resolve();
             const source = audioCtx.createBufferSource();
             source.buffer = decoded;
             source.connect(audioCtx.destination);
@@ -1572,6 +1723,7 @@ Remember: you are holding space for two people to feel heard by each other. Your
 
         // ── Fallback: HTMLAudioElement ──
         try {
+          if (isStale && isStale()) return resolve();
           const blob = new Blob([arrayBuffer], { type: 'audio/mpeg' });
           const url = URL.createObjectURL(blob);
           const audio = new Audio(url);
@@ -1589,7 +1741,18 @@ Remember: you are holding space for two people to feel heard by each other. Your
           };
           audio.onended = cleanup;
           audio.onerror = cleanup;
-          audio.play().catch(cleanup);
+          // A rejected play() (iOS autoplay policy outside a gesture) must
+          // surface as a real error, not resolve as if the sentence played
+          // — swallowing it hid every silent-playback failure mode.
+          audio.play().catch((err) => {
+            if (done) return;
+            done = true;
+            audio.onended = null;
+            audio.onerror = null;
+            URL.revokeObjectURL(url);
+            audioRef.current = null;
+            reject(err || new Error('audio-play-blocked'));
+          });
         } catch(e) {
           audioRef.current = null;
           resolve();
@@ -1654,7 +1817,7 @@ Remember: you are holding space for two people to feel heard by each other. Your
           try {
             const buf = await ttsPromises[i];
             if (cancelledRef.current) return;
-            await playAudioBuffer(buf, audioRef);
+            await playAudioBuffer(buf, audioRef, () => cancelledRef.current);
           } catch (err) {
             // One sentence failing must not silence the rest — record the
             // error (surfaced as a banner) and keep playing the remaining
@@ -1776,27 +1939,44 @@ Remember: you are holding space for two people to feel heard by each other. Your
                 const res = await sentences[streamIndex];
                 if (!res.ok) throw new Error(`TTS ${res.status}`);
                 const reader = res.body.getReader();
+                // Watchdog per read: the server's 8s abort only covers time
+                // to headers — a body that stalls mid-stream would otherwise
+                // hang `finished` forever and freeze the reply pipeline.
+                const readWithTimeout = () => new Promise((resolve, reject) => {
+                  const t = setTimeout(() => reject(new Error('tts-stalled')), 10000);
+                  reader.read().then(
+                    (v) => { clearTimeout(t); resolve(v); },
+                    (err) => { clearTimeout(t); reject(err); }
+                  );
+                });
                 let leftover = new Uint8Array(0);
-                while (true) {
-                  const { done, value } = await reader.read();
-                  if (isStale()) { try { reader.cancel(); } catch (e) {} break; }
-                  if (done) break;
-                  let bytes = value;
-                  if (leftover.length) {
-                    const joined = new Uint8Array(leftover.length + value.length);
-                    joined.set(leftover, 0);
-                    joined.set(value, leftover.length);
-                    bytes = joined;
+                try {
+                  while (true) {
+                    const { done, value } = await readWithTimeout();
+                    if (isStale()) { try { reader.cancel(); } catch (e) {} break; }
+                    if (done) break;
+                    let bytes = value;
+                    if (leftover.length) {
+                      const joined = new Uint8Array(leftover.length + value.length);
+                      joined.set(leftover, 0);
+                      joined.set(value, leftover.length);
+                      bytes = joined;
+                    }
+                    // Only whole 16-bit samples; carry odd trailing byte over.
+                    const usable = bytes.length & ~1;
+                    leftover = bytes.subarray(usable);
+                    if (usable >= 2) {
+                      const view = new DataView(bytes.buffer, bytes.byteOffset, usable);
+                      const int16 = new Int16Array(usable >> 1);
+                      for (let i = 0; i < int16.length; i++) int16[i] = view.getInt16(i * 2, true);
+                      pushSamples(resamplePCM(int16), false);
+                    }
                   }
-                  // Only whole 16-bit samples; carry odd trailing byte over.
-                  const usable = bytes.length & ~1;
-                  leftover = bytes.subarray(usable);
-                  if (usable >= 2) {
-                    const view = new DataView(bytes.buffer, bytes.byteOffset, usable);
-                    const int16 = new Int16Array(usable >> 1);
-                    for (let i = 0; i < int16.length; i++) int16[i] = view.getInt16(i * 2, true);
-                    pushSamples(resamplePCM(int16), false);
-                  }
+                } catch (readErr) {
+                  // Stalled or broken body: drop this sentence and move on —
+                  // the pipeline (and `finished`) must keep flowing.
+                  try { reader.cancel(); } catch (e) {}
+                  throw readErr;
                 }
                 // Sentence over: a single zero sample releases the held-back
                 // tail sample from the resampler (fading the seam to
@@ -1845,7 +2025,7 @@ Remember: you are holding space for two people to feel heard by each other. Your
             try {
               const buf = await queue[playIndex];
               if (isStale()) break;
-              await playAudioBuffer(buf, audioRef);
+              await playAudioBuffer(buf, audioRef, isStale);
             } catch (e) {
               console.error('Stream TTS chunk error:', e);
               lastErrorRef.current = e?.message || String(e);
@@ -2033,10 +2213,20 @@ Remember: you are holding space for two people to feel heard by each other. Your
       // hard-refresh (shift+reload) drops the SW controller too, which
       // kicked returning testers back to the gate for no reason.
       const [appMode, setAppMode] = React.useState(() => loadFromStorage(STORAGE_KEYS.appMode, null));
-      const [started, setStarted] = React.useState(!!savedConvo);
+      // A saved profile also counts as onboarded: greeting-only conversations
+      // are deliberately never persisted, so between finishing onboarding and
+      // sending the first message a reload used to fall back into the
+      // questionnaire (losing the beta greeting, or the whole quiz). Seed a
+      // silent greeting conversation instead — voiceState starts 'idle', so
+      // nothing speaks and the mic stays off.
+      const [started, setStarted] = React.useState(!!savedConvo || !!savedProfile);
       const [profile, setProfile] = React.useState(savedProfile);
-      const [messages, setMessages] = React.useState(savedConvo ? savedConvo.messages : []);
-      const [activeConvoId, setActiveConvoId] = React.useState(savedConvo ? savedConvo.id : null);
+      const [messages, setMessages] = React.useState(() =>
+        savedConvo ? savedConvo.messages
+        : savedProfile ? [{ role: 'assistant', content: buildGreeting(savedProfile) }]
+        : []);
+      const [activeConvoId, setActiveConvoId] = React.useState(() =>
+        savedConvo ? savedConvo.id : (savedProfile ? generateId() : null));
       const [showHistory, setShowHistory] = React.useState(false);
       const [conversations, setConversations] = React.useState(() => loadConversations());
       const [voiceState, setVoiceState] = React.useState('idle');
@@ -2075,7 +2265,12 @@ Remember: you are holding space for two people to feel heard by each other. Your
       const profileRef = React.useRef(profile);
       const activeConvoIdRef = React.useRef(activeConvoId);
       const inputRef = React.useRef(null);
-      const useRecorderFallback = React.useMemo(() => needsRecorderFallback(), []);
+      // forceRecorder: flipped at runtime when native SpeechRecognition
+      // turns out to be broken despite existing (Brave/un-keyed Chromium
+      // fire 'network' on every start; some iOS WKWebViews never fire any
+      // event) — the MediaRecorder → Whisper path works fine there.
+      const [forceRecorder, setForceRecorder] = React.useState(false);
+      const useRecorderFallback = React.useMemo(() => needsRecorderFallback(), []) || forceRecorder;
       const nativeSTT = useSpeechRecognition();
       const recorderSTT = useMediaRecorderSTT();
       const { start: startRec, stop: stopRec, abort: abortRec, supported: sttSupported } =
@@ -2097,6 +2292,14 @@ Remember: you are holding space for two people to feel heard by each other. Your
       // any single render.
       const voiceStateRef = React.useRef('idle');
       React.useEffect(() => { voiceStateRef.current = voiceState; }, [voiceState]);
+      // True from speech_started until the turn resolves (completed/failed).
+      // Read by the streaming pipeline so a reply's TTS never starts talking
+      // over a user who is mid-utterance while the state is 'processing'.
+      const userSpeakingRef = React.useRef(false);
+      // Deadline (ms epoch) before which the next realtime turn is dropped —
+      // set when a typed message supersedes a half-captured spoken one, so
+      // the abandoned fragment can't cancel the typed message's reply.
+      const suppressTurnRef = React.useRef(0);
       // Voice replies off: replies stream as text only, no TTS. The escape
       // hatch for testers in bad audio environments — they can keep
       // evaluating the coaching with the mic and/or keyboard while the
@@ -2137,6 +2340,8 @@ Remember: you are holding space for two people to feel heard by each other. Your
         streamAbortRef.current?.abort();
         abortRec();
         cancelSpeak();
+        userSpeakingRef.current = false;
+        suppressTurnRef.current = 0;
       };
 
       React.useEffect(() => { messagesRef.current = messages; }, [messages]);
@@ -2150,15 +2355,26 @@ Remember: you are holding space for two people to feel heard by each other. Your
       React.useEffect(() => {
         if (!activeConvoIdRef.current || messages.length === 0) return;
         if (!messages.some(m => m.role === 'user')) return;
-        const convo = {
-          id: activeConvoIdRef.current,
-          title: messages.find(m => m.role === 'user')?.content.slice(0, 60) || 'New conversation',
-          messages,
-          updatedAt: Date.now(),
-        };
-        saveConversation(convo);
-        saveToStorage(STORAGE_KEYS.activeId, activeConvoIdRef.current);
-        setConversations(loadConversations());
+        // Debounced: streaming updates `messages` on every SSE delta, and a
+        // full localStorage parse/stringify of all conversations per delta
+        // janked audio playback on low-end phones. Trailing save 400ms after
+        // the last change covers stream-end, abort, and normal sends alike.
+        const t = setTimeout(() => {
+          const p = profileRef.current;
+          const convo = {
+            id: activeConvoIdRef.current,
+            title: messages.find(m => m.role === 'user')?.content.slice(0, 60) || 'New conversation',
+            messages,
+            updatedAt: Date.now(),
+            // Snapshot the mode so reopening this conversation from history
+            // rebuilds the system prompt it was actually held under.
+            ...(p ? { mode: p.mode, goal: p.goal ?? null, path: p.path } : {}),
+          };
+          saveConversation(convo);
+          saveToStorage(STORAGE_KEYS.activeId, activeConvoIdRef.current);
+          setConversations(loadConversations());
+        }, 400);
+        return () => clearTimeout(t);
       }, [messages]);
 
       React.useEffect(() => {
@@ -2195,6 +2411,7 @@ Remember: you are holding space for two people to feel heard by each other. Your
         // Speak the greeting through the gapless PCM path, sentence by
         // sentence, so audio starts on the first network chunk instead of
         // after the first full MP3 has been generated and downloaded.
+        voiceStateRef.current = 'speaking';
         setVoiceState('speaking');
         const sp = speakStreaming();
         for (const s of splitSentences(greeting)) {
@@ -2239,6 +2456,17 @@ Remember: you are holding space for two people to feel heard by each other. Your
         voiceStateRef.current = 'processing'; // keep the barge-in ref in lockstep
         setVoiceState('processing');
         setInterimText('');
+
+        // Watchdog: a request that dies silently (mobile wifi→cellular
+        // handoff) must not strand the UI at 'Thinking…'. `timedOut` lets
+        // the catch block tell a watchdog abort (show the error, reset
+        // state) apart from a deliberate interruption (stay silent).
+        let timedOut = false;
+        let watchdog = setTimeout(() => { timedOut = true; ac.abort(); }, 30000);
+        const feedWatchdog = () => {
+          clearTimeout(watchdog);
+          watchdog = setTimeout(() => { timedOut = true; ac.abort(); }, 30000);
+        };
 
         try {
           const response = await fetch('/api/chat-stream', {
@@ -2291,9 +2519,15 @@ Remember: you are holding space for two people to feel heard by each other. Your
             return fullText.length;
           };
 
+          // Upstream failure surfaced mid-stream by the server (Anthropic
+          // overload/error events) — previously swallowed, leaving a silent
+          // empty reply that looked like the app just ignored the user.
+          let upstreamError = null;
+
           while (true) {
             const { done, value } = await reader.read();
             if (done) break;
+            feedWatchdog();
 
             lineBuffer += decoder.decode(value, { stream: true });
             const lines = lineBuffer.split('\n');
@@ -2306,13 +2540,22 @@ Remember: you are holding space for two people to feel heard by each other. Your
 
               try {
                 const parsed = JSON.parse(data);
+                if (parsed.error) { upstreamError = parsed.error; continue; }
                 if (parsed.text) {
                   fullText += parsed.text;
 
                   // Split the channels for display as the reply streams in.
+                  // The display uses the same partial-marker holdback as the
+                  // TTS path — without it, '[[VIS' flashed as literal text
+                  // whenever the marker arrived split across deltas.
                   const markerIdx = fullText.indexOf(VISUAL_MARKER);
-                  const spokenText = (markerIdx === -1 ? fullText : fullText.slice(0, markerIdx)).trim();
-                  const visualText = markerIdx === -1 ? '' : fullText.slice(markerIdx + VISUAL_MARKER.length).trim();
+                  const displayEnd = markerIdx === -1 ? speakableEnd() : markerIdx;
+                  const spokenText = fullText.slice(0, displayEnd).trim();
+                  // Strip any repeated markers inside the visual channel so
+                  // they can't render literally in the card.
+                  const visualText = markerIdx === -1
+                    ? ''
+                    : fullText.slice(markerIdx + VISUAL_MARKER.length).split(VISUAL_MARKER).join('\n').trim();
                   setMessages([...updated, {
                     role: 'assistant',
                     content: spokenText,
@@ -2339,9 +2582,14 @@ Remember: you are holding space for two people to feel heard by each other. Your
                   const clauseThreshold = isFirstChunk ? 12 : 80;
                   const forceThreshold = isFirstChunk ? 28 : 160;
 
+                  // Break points require trailing whitespace so '.' inside
+                  // numbers/abbreviations ('7.5', 'e.g.') and ',' inside
+                  // '1,000' never chop a token into separate TTS chunks;
+                  // [.!?]+ keeps an ellipsis in one piece. The end-of-stream
+                  // `remaining` handler covers a final unterminated sentence.
                   let fireChunk = null;
-                  const sentenceMatch = sentenceBuffer.match(/^([\s\S]*?[.!?])[\s]?/);
-                  const clauseMatch = sentenceBuffer.length > clauseThreshold && sentenceBuffer.match(/^([\s\S]*?[,;:\u2014\u2013])[\s]?/);
+                  const sentenceMatch = sentenceBuffer.match(/^([\s\S]*?[.!?]+)\s/);
+                  const clauseMatch = sentenceBuffer.length > clauseThreshold && sentenceBuffer.match(/^([\s\S]*?[,;:\u2014\u2013])\s/);
 
                   if (sentenceMatch) {
                     fireChunk = sentenceMatch[1].trim();
@@ -2357,7 +2605,12 @@ Remember: you are holding space for two people to feel heard by each other. Your
                     sentenceBuffer = sentenceBuffer.slice(splitAt);
                   }
 
-                  if (fireChunk && fireChunk.length > 0 && !voiceMutedRef.current) {
+                  // userSpeakingRef gate: if the user is mid-utterance while
+                  // this reply arrives (they talked during 'processing',
+                  // where barge-in can't fire), don't start talking over
+                  // them — the text still streams, and their completed turn
+                  // will supersede this reply anyway.
+                  if (fireChunk && fireChunk.length > 0 && !voiceMutedRef.current && !userSpeakingRef.current) {
                     if (!streamSpeaker) {
                       streamSpeaker = speakStreaming();
                       // Sync the ref before React re-renders: barge-in
@@ -2376,9 +2629,13 @@ Remember: you are holding space for two people to feel heard by each other. Your
             }
           }
 
+          clearTimeout(watchdog);
+          if (upstreamError) throw new Error(upstreamError);
+          if (!fullText.trim()) throw new Error('Empty reply');
+
           // Handle any remaining text that didn't end with punctuation
           const remaining = sentenceBuffer.trim();
-          if (remaining.length > 0 && !voiceMutedRef.current) {
+          if (remaining.length > 0 && !voiceMutedRef.current && !userSpeakingRef.current) {
             if (!streamSpeaker) {
               streamSpeaker = speakStreaming();
               voiceStateRef.current = 'speaking'; // see comment above
@@ -2410,12 +2667,19 @@ Remember: you are holding space for two people to feel heard by each other. Your
             ? (handsFreeRef.current ? 'listening' : 'idle')
             : v);
         } catch (err) {
-          if (ac.signal.aborted) return; // interrupted on purpose
+          clearTimeout(watchdog);
+          if (ac.signal.aborted && !timedOut) return; // interrupted on purpose
           console.error('Error:', err);
+          // Kill any TTS already scheduled — the state is about to say
+          // 'listening', and barge-in refuses to cancel audio in that state,
+          // so orphaned chunks would keep talking uninterruptibly.
+          cancelSpeak();
           setError('Something went wrong. Tap to try again.');
-          setVoiceState(v => (v === 'speaking' || v === 'processing')
-            ? (handsFreeRef.current ? 'listening' : 'idle')
-            : v);
+          const v = handsFreeRef.current ? 'listening' : 'idle';
+          setVoiceState(prev => (prev === 'speaking' || prev === 'processing') ? v : prev);
+          if (voiceStateRef.current === 'speaking' || voiceStateRef.current === 'processing') {
+            voiceStateRef.current = v;
+          }
           setTimeout(() => setError(null), 4000);
         }
       };
@@ -2439,48 +2703,35 @@ Remember: you are holding space for two people to feel heard by each other. Your
       // drop mid-sentence later.
       const SESSION_ROTATE_MS = 8 * 60 * 1000;
 
-      const cycleRealtimeSession = async () => {
-        if (!handsFreeRef.current || reconnectingRef.current) return;
+      // Single-flight connect covering the initial open, rebuilds, and the
+      // visibility handler — two concurrent startSessions meant two live
+      // mics and doubled transcriptions.
+      const connectRealtime = async () => {
+        if (reconnectingRef.current) return false;
         reconnectingRef.current = true;
-        realtime.endSession();
-        await openSessionRef.current().catch(() => false);
-        reconnectingRef.current = false;
+        try {
+          return await openSessionRef.current().catch(() => false);
+        } finally {
+          reconnectingRef.current = false;
+        }
       };
 
-      const handleRealtimeError = async (err) => {
-        if (!handsFreeRef.current) return;
-        const blocked = err === 'not-allowed';
-        // Failures that retrying can't help: permission, no hardware, or
-        // the realtime path being unavailable at setup.
-        const hardFailure = blocked || err === 'no-mic' || err === 'mic-failed'
-          || err === 'realtime-unavailable' || err === 'realtime-failed';
-
-        if (!hardFailure) {
-          // The session was up and dropped. If we're backgrounded, don't
-          // rebuild into a hidden tab — the visibility handler below does
-          // it the moment the app comes back.
-          if (document.visibilityState === 'hidden') {
-            realtime.endSession();
-            return;
-          }
-          if (reconnectingRef.current) return;
-          if (reconnectAttemptsRef.current < 3) {
-            reconnectAttemptsRef.current++;
-            reconnectingRef.current = true;
-            realtime.endSession();
-            const ok = await openSessionRef.current().catch(() => false);
-            reconnectingRef.current = false;
-            // On failure the attempt's own onError ran the fallback path
-            // (it reports a hard setup failure); nothing more to do here.
-            return;
-          }
+      const cycleRealtimeSession = async () => {
+        if (!handsFreeRef.current || reconnectingRef.current) return;
+        realtime.endSession();
+        const ok = await connectRealtime();
+        if (!ok && handsFreeRef.current && !reconnectingRef.current) {
+          handleRealtimeError('connection-lost');
         }
+      };
 
-        // Unrecoverable: tear down and fall back.
+      // Tear down hands-free and fall back to tap-to-talk / text.
+      const failHandsFree = (err) => {
         handsFreeRef.current = false;
         setHandsFree(false);
         realtime.endSession();
-        if (blocked) {
+        userSpeakingRef.current = false;
+        if (err === 'not-allowed') {
           setMicBlocked(true);
           setError('Microphone blocked. Tap the lock/site icon in the address bar to allow it, then try again.');
         } else if (err === 'no-mic') {
@@ -2493,6 +2744,47 @@ Remember: you are holding space for two people to feel heard by each other. Your
         }
         setInterimText('');
         setVoiceState(v => v === 'listening' ? 'idle' : v);
+        if (voiceStateRef.current === 'listening') voiceStateRef.current = 'idle';
+      };
+
+      const handleRealtimeError = async (err) => {
+        if (!handsFreeRef.current) return;
+        // Failures no amount of retrying can fix: permission or hardware.
+        const micFailure = err === 'not-allowed' || err === 'no-mic' || err === 'mic-failed';
+        if (micFailure) {
+          failHandsFree(err);
+          return;
+        }
+
+        // Transient: the session dropped, or a setup attempt failed while
+        // the network was recovering. Retry with a short backoff up to the
+        // budget — previously a failed rebuild's own setup error was
+        // reclassified as a hard failure, so one network blip permanently
+        // disabled hands-free for the visit.
+        if (document.visibilityState === 'hidden') {
+          // Don't rebuild into a hidden tab — the visibility handler does
+          // it the moment the app comes back.
+          realtime.endSession();
+          return;
+        }
+        // A driven attempt is already in flight — its driver observes the
+        // outcome; re-entrant setup errors must not double-drive recovery.
+        if (reconnectingRef.current) return;
+        reconnectingRef.current = true;
+        try {
+          while (handsFreeRef.current && reconnectAttemptsRef.current < 3) {
+            reconnectAttemptsRef.current++;
+            realtime.endSession();
+            // Backoff: an instant redial into the same outage is doomed.
+            await new Promise(r => setTimeout(r, 700 * reconnectAttemptsRef.current));
+            if (!handsFreeRef.current || document.visibilityState === 'hidden') return;
+            const ok = await openSessionRef.current().catch(() => false);
+            if (ok) return;
+          }
+        } finally {
+          reconnectingRef.current = false;
+        }
+        if (handsFreeRef.current) failHandsFree(err);
       };
 
       const openRealtimeSession = async () => {
@@ -2504,6 +2796,14 @@ Remember: you are holding space for two people to feel heard by each other. Your
             },
             onTurn: (text) => {
               if (!handsFreeRef.current) return;
+              // A typed message just superseded this half-captured
+              // utterance — drop the fragment instead of letting it cancel
+              // the typed message's reply.
+              if (suppressTurnRef.current) {
+                const stillValid = Date.now() < suppressTurnRef.current;
+                suppressTurnRef.current = 0;
+                if (stillValid) { setInterimText(''); return; }
+              }
               reconnectAttemptsRef.current = 0; // healthy session — reset budget
               setInterimText('');
               sendToClaude(text);
@@ -2513,6 +2813,7 @@ Remember: you are holding space for two people to feel heard by each other. Your
             },
             onSpeechStart: () => {
               if (!handsFreeRef.current) return;
+              userSpeakingRef.current = true;
               // Barge-in: the user started talking over the assistant — stop
               // the reply (audio and stream) and listen. No tap needed.
               if (voiceStateRef.current === 'speaking') {
@@ -2522,9 +2823,22 @@ Remember: you are holding space for two people to feel heard by each other. Your
                 setVoiceState('listening');
               }
             },
+            onSpeechStop: () => {
+              userSpeakingRef.current = false;
+            },
             onError: handleRealtimeError,
           });
-          if (ok) sessionStartedAtRef.current = Date.now();
+          if (ok) {
+            sessionStartedAtRef.current = Date.now();
+            // A rebuild that stays up is healthy — refill the retry budget
+            // so hours of idle listening survive repeated upstream expiries
+            // (previously only a captured turn reset it).
+            setTimeout(() => {
+              if (handsFreeRef.current && realtime.isActive()) {
+                reconnectAttemptsRef.current = 0;
+              }
+            }, 30000);
+          }
           return ok;
         } finally {
           setRtConnecting(false);
@@ -2538,10 +2852,13 @@ Remember: you are holding space for two people to feel heard by each other. Your
         const onVisible = async () => {
           if (document.visibilityState !== 'visible') return;
           if (!handsFreeRef.current || reconnectingRef.current) return;
+          // isActive() also checks the mic track is live — a session whose
+          // track the OS killed while backgrounded needs the rebuild too.
           if (realtime.isActive()) return;
-          reconnectingRef.current = true;
-          await openSessionRef.current().catch(() => false);
-          reconnectingRef.current = false;
+          const ok = await connectRealtime();
+          if (!ok && handsFreeRef.current && !reconnectingRef.current) {
+            handleRealtimeError('connection-lost');
+          }
         };
         document.addEventListener('visibilitychange', onVisible);
         return () => document.removeEventListener('visibilitychange', onVisible);
@@ -2554,9 +2871,13 @@ Remember: you are holding space for two people to feel heard by each other. Your
         setTranscribing(false);
         handsFreeRef.current = true;
         setHandsFree(true);
+        voiceStateRef.current = 'listening';
         setVoiceState('listening');
         reconnectAttemptsRef.current = 0;
-        await openRealtimeSession();
+        const ok = await connectRealtime();
+        // Mic/permission failures already tore down via failHandsFree
+        // (handsFreeRef is false then); anything else falls back here.
+        if (!ok && handsFreeRef.current) failHandsFree('realtime-failed');
       };
 
       const endHandsFree = () => {
@@ -2565,7 +2886,10 @@ Remember: you are holding space for two people to feel heard by each other. Your
         realtime.endSession();
         streamAbortRef.current?.abort();
         cancelSpeak();
+        userSpeakingRef.current = false;
+        suppressTurnRef.current = 0;
         setInterimText('');
+        voiceStateRef.current = 'idle';
         setVoiceState('idle');
       };
 
@@ -2576,10 +2900,20 @@ Remember: you are holding space for two people to feel heard by each other. Your
             // Manual barge-in: stop the reply, keep the conversation open.
             streamAbortRef.current?.abort();
             cancelSpeak();
+            voiceStateRef.current = 'listening';
             setVoiceState('listening');
             return;
           }
-          if (voiceState === 'processing') return;
+          if (voiceState === 'processing') {
+            // Escape hatch: cancel a stuck request instead of ignoring the
+            // tap — with no fetch timeout a hung network otherwise left the
+            // UI stranded at 'Thinking…'.
+            streamAbortRef.current?.abort();
+            cancelSpeak();
+            voiceStateRef.current = 'listening';
+            setVoiceState('listening');
+            return;
+          }
           endHandsFree();
           return;
         }
@@ -2594,11 +2928,19 @@ Remember: you are holding space for two people to feel heard by each other. Your
           if (realtime.supported && realtimeEnabledRef.current) {
             startHandsFree();
           } else {
+            voiceStateRef.current = 'idle';
             setVoiceState('idle');
           }
           return;
         }
-        if (voiceState === 'processing') return;
+        if (voiceState === 'processing') {
+          // Same escape hatch on the tap-to-talk path.
+          streamAbortRef.current?.abort();
+          cancelSpeak();
+          voiceStateRef.current = 'idle';
+          setVoiceState('idle');
+          return;
+        }
 
         // Prefer the hands-free realtime path; fall back to tap-to-talk if
         // it's unsupported here or already failed once this visit.
@@ -2635,12 +2977,21 @@ Remember: you are holding space for two people to feel heard by each other. Your
           (err) => {
             let msg;
             const blocked = err === 'not-allowed' || err === 'service-not-allowed';
+            // Native SpeechRecognition that exists but doesn't work: dead
+            // engines (in-app iOS browsers — caught by the start watchdog)
+            // and un-keyed Chromium builds like Brave ('network' on every
+            // start). The MediaRecorder → Whisper path works on those, so
+            // demote to it instead of dead-ending voice.
+            const srBroken = (err === 'start-failed' || err === 'network' || err === 'not-supported');
             if (blocked) {
               msg = 'Microphone blocked. Tap the lock/site icon in the address bar to allow it, then try again.';
               setMicBlocked(true);
             } else if (err === 'no-mic') {
               msg = 'No microphone detected on this device.';
-            } else if (err === 'not-supported' || err === 'start-failed' || err === 'recorder-failed') {
+            } else if (srBroken && !useRecorderFallback && recorderSTT.supported) {
+              setForceRecorder(true);
+              msg = 'Switched to a compatible voice mode — tap the mic to try again.';
+            } else if (err === 'not-supported' || err === 'start-failed' || err === 'network' || err === 'recorder-failed') {
               msg = 'Voice not supported in this browser. Use the text input below.';
             } else if (err === 'stt-failed') {
               msg = 'Could not transcribe audio. Try again or use the text input.';
@@ -2667,13 +3018,25 @@ Remember: you are holding space for two people to feel heard by each other. Your
 
       const handleTextSubmit = (e) => {
         e.preventDefault();
-        if (!textInput.trim() || voiceState === 'processing' || voiceState === 'speaking') return;
+        // Typing is always available — during 'speaking' it acts as a
+        // barge-in (sendToClaude aborts the old stream and audio), so a
+        // tester can interrupt the ~30s greeting without granting mic
+        // access. Previously the composer was locked for the whole reply.
+        if (!textInput.trim()) return;
         if (voiceState === 'listening') {
           // User switched to typing mid-listen. Tap-to-talk: drop the mic
           // session so its silence timer can't fire a second, competing
           // message. Hands-free: the session stays open — they can keep
-          // talking after this typed turn.
-          if (!handsFreeRef.current) abortRec();
+          // talking after this typed turn, but any half-captured utterance
+          // is discarded so its late transcription can't cancel this
+          // message's reply.
+          if (!handsFreeRef.current) {
+            abortRec();
+          } else if (userSpeakingRef.current || interimText) {
+            realtime.clearInput();
+            suppressTurnRef.current = Date.now() + 3000;
+            userSpeakingRef.current = false;
+          }
           setInterimText('');
         }
         cancelSpeak();
@@ -2726,6 +3089,11 @@ Remember: you are holding space for two people to feel heard by each other. Your
       };
 
       const handleStartOver = () => {
+        // Full reset means full reset: the gate promises "conversations are
+        // stored only on this device", so handing the device to the next
+        // tester must not leave the previous tester's coaching sessions
+        // readable in the history drawer.
+        if (!window.confirm('This clears your profile and all conversations on this device. Continue?')) return;
         stopVoicePipeline();
         setProfile(null);
         profileRef.current = null;
@@ -2734,6 +3102,8 @@ Remember: you are holding space for two people to feel heard by each other. Your
         setActiveConvoId(null);
         saveToStorage(STORAGE_KEYS.activeId, null);
         saveToStorage(STORAGE_KEYS.appMode, null);
+        saveToStorage(STORAGE_KEYS.conversations, []);
+        setConversations([]);
         setAppMode(null);
         setVoiceState('idle');
         setInterimText('');
@@ -2745,6 +3115,15 @@ Remember: you are holding space for two people to feel heard by each other. Your
 
       const handleLoadConversation = (convo) => {
         stopVoicePipeline();
+        // Restore the mode this conversation was held under — resuming a
+        // facilitator session must not continue with the coach prompt (or
+        // vice versa) just because the user switched modes since.
+        if (convo.mode && profile && (convo.mode !== profile.mode || convo.path !== profile.path)) {
+          const restored = { ...profile, mode: convo.mode, goal: convo.goal ?? null, path: convo.path || profile.path };
+          setProfile(restored);
+          profileRef.current = restored;
+          saveProfile(restored);
+        }
         setActiveConvoId(convo.id);
         activeConvoIdRef.current = convo.id;
         setMessages(convo.messages);
@@ -2759,6 +3138,10 @@ Remember: you are holding space for two people to feel heard by each other. Your
 
       const handleDeleteConversation = (e, id) => {
         e.stopPropagation();
+        // Deletion is permanent (localStorage only) and the button sits
+        // inside the tappable row — confirm so a stray tap can't silently
+        // destroy a conversation.
+        if (!window.confirm('Delete this conversation?')) return;
         const remaining = deleteConversation(id);
         setConversations(remaining);
         if (id === activeConvoId) {
@@ -3250,12 +3633,11 @@ Remember: you are holding space for two people to feel heard by each other. Your
               value: textInput,
               onChange: (e) => setTextInput(e.target.value),
               placeholder: profile?.mode === 'facilitator' ? 'Sarah: ... or Mark: ...' : 'Or type here...',
-              disabled: voiceState === 'processing' || voiceState === 'speaking',
               className: 'text-input',
             }),
             React.createElement('button', {
               type: 'submit',
-              disabled: !textInput.trim() || voiceState === 'processing' || voiceState === 'speaking',
+              disabled: !textInput.trim(),
               className: `send-btn ${textInput.trim() ? 'active' : ''}`,
             },
               React.createElement('svg', { width: 20, height: 20, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2.5, strokeLinecap: 'round', strokeLinejoin: 'round' },
@@ -3270,7 +3652,7 @@ Remember: you are holding space for two people to feel heard by each other. Your
           ),
 
           // Version label
-          React.createElement('p', { className: 'version-label' }, 'v2.5.2')
+          React.createElement('p', { className: 'version-label' }, 'v2.5.3')
         )
       );
     };
