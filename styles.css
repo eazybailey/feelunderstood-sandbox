@@ -2539,3 +2539,48 @@ html, body {
 .visual-aid ul { margin: 6px 0; padding-left: 18px; }
 .visual-aid li { margin: 4px 0; }
 .visual-aid strong { font-weight: 700; }
+
+/* ── Sandbox: A/B variant pill (mode banner) ── */
+.sot-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: 10px;
+  vertical-align: middle;
+}
+.sot-pill-label {
+  font-weight: 600;
+  color: var(--text);
+}
+.sot-pill-btn {
+  min-width: 26px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid rgba(var(--accent-rgb), 0.45);
+  background: transparent;
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.4;
+  cursor: pointer;
+}
+.sot-pill-btn:hover { color: var(--text); }
+.sot-pill-active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #1a1a2e;
+}
+
+/* ── Sandbox: dev panel ── */
+.dev-card p { margin: 7px 0; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.dev-keep {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  font-size: 13px;
+  color: var(--text-dim);
+  margin: 16px 0 20px;
+  cursor: pointer;
+}
+.dev-keep input { margin-top: 2px; }

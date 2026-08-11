@@ -1,4 +1,7 @@
-const CACHE_NAME = 'feel-understood-v2.5.3';
+// Sandbox: the service worker is NOT registered (index.html unregisters
+// any leftover worker). The renamed cache is belt-and-braces so a stray
+// registration from an earlier deploy can never serve stale assets.
+const CACHE_NAME = 'sandbox-v0.1';
 // Note: no '/index.html' entry — vercel.json's cleanUrls answers it with a
 // 308 redirect to '/', and a cached redirected response served to a
 // navigation is rejected by browsers as a network error. '/' carries the

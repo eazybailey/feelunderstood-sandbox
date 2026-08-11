@@ -1,3 +1,10 @@
+> **SANDBOX FORK — read `SANDBOX_NOTES.md` first.** This repo is the
+> Sandbox v0.1 A/B test rig forked from `eazybailey/chatbot-demo` (see
+> `Feel_Understood_Sandbox_Build_Brief_V1.1.md`). The notes below describe
+> the live app; in this fork the service worker is disabled, the version
+> label is `sandbox-0.1`, only the name → Helpline path is exposed, and the
+> coach prompt has an A/B Source of Truth toggle with prompt caching.
+
 # The Conversation Coach
 
 A voice-first Progressive Web App for practicing better conversations through AI coaching, built on the "Dialogue System" framework by Gerard Egan and Andrew Bailey.

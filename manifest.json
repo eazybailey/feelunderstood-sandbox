@@ -1,7 +1,7 @@
 {
-  "name": "Feel Understood — Your Conversation Coach",
-  "short_name": "Feel Understood",
-  "description": "Feel Understood — Your Conversation Coach. Practice better conversations with AI.",
+  "name": "Feel Understood — Sandbox",
+  "short_name": "FU Sandbox",
+  "description": "Feel Understood — Sandbox. A test rig for A/B testing two versions of the conversation coach.",
   "start_url": "/",
   "display": "standalone",
   "orientation": "portrait",
