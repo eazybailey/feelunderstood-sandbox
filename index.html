@@ -1,30 +1,13 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <link rel="icon" type="image/png" href="/images/favicon-64.png">
-  <link rel="apple-touch-icon" href="/images/apple-touch-icon.png">
-  <link rel="manifest" href="/manifest.json">
-  <meta name="theme-color" content="#ffffff" id="meta-theme-color">
+  <meta name="theme-color" content="#ffffff">
   <link rel="preconnect" href="https://api.openai.com">
-  <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="default">
-  <meta name="apple-mobile-web-app-title" content="FU Sandbox">
   <meta name="description" content="Feel Understood — Sandbox. A test rig for A/B testing two versions of the conversation coach.">
   <title>Feel Understood — Sandbox</title>
-  <script>
-    // Apply persisted theme before render to avoid flash. Defaults to light.
-    (function() {
-      try {
-        var saved = localStorage.getItem('fu_theme');
-        var theme = saved === 'dark' ? 'dark' : 'light';
-        document.documentElement.setAttribute('data-theme', theme);
-        var meta = document.querySelector('meta[name="theme-color"]');
-        if (meta) meta.setAttribute('content', theme === 'dark' ? '#0a0a0a' : '#ffffff');
-      } catch (e) {}
-    })();
-  </script>
   <link rel="stylesheet" href="styles.css">
   <!-- React is vendored (pinned 18.3.1) so a CDN outage or an unpinned
        "latest" release can never break the app for testers. The app code
@@ -42,24 +25,20 @@
       conversations: 'fu_conversations',
       activeId: 'fu_active_conversation',
       profile: 'fu_profile',
-      appMode: 'fu_app_mode',
       voiceMuted: 'fu_voice_muted',
       sotVariant: 'fu_sot_variant',
     };
     const MAX_CONVERSATIONS = 50;
 
     // ── Sandbox configuration ──
-    // This is the Sandbox v0.1 rig (see Feel_Understood_Sandbox_Build_Brief_V1.1.md):
-    // a stripped-back name → Helpline path with an A/B toggle between two
-    // system-prompt variants. SANDBOX hides (never deletes) everything
-    // outside that path, so diffing against the live app stays easy.
-    const SANDBOX = true;
+    // This is the Sandbox rig (see Feel_Understood_Sandbox_Build_Brief_V1.1.md):
+    // a single name → Helpline path with an A/B toggle between two
+    // system-prompt variants.
     const SANDBOX_VERSION = 'sandbox-0.1';
     // The control-condition voice stack for the v0.2 bake-off: today's
-    // cascade (SpeechRecognition / /api/stt → /api/chat-stream → /api/tts).
+    // pipeline (OpenAI Realtime hands-free STT, with SpeechRecognition /
+    // /api/stt fallbacks → /api/chat-stream → /api/tts).
     const VOICE_STACK = 'current';
-    // Mirrors api/chat-stream.js — dev-panel readout only.
-    const CHAT_MODEL = 'claude-sonnet-4-6';
 
     const generateId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 
@@ -84,25 +63,12 @@
       saveToStorage(STORAGE_KEYS.conversations, all);
     };
 
-    const deleteConversation = (id) => {
-      const all = loadConversations().filter(c => c.id !== id);
-      saveToStorage(STORAGE_KEYS.conversations, all);
-      // A stale active pointer at a deleted conversation would dead-end the
-      // next load back into onboarding.
-      if (loadFromStorage(STORAGE_KEYS.activeId, null) === id) {
-        saveToStorage(STORAGE_KEYS.activeId, null);
-      }
-      return all;
-    };
-
     const loadProfile = () => loadFromStorage(STORAGE_KEYS.profile, null);
     const saveProfile = (profile) => saveToStorage(STORAGE_KEYS.profile, profile);
 
-    // ── Profile-based System Prompt Builder ──
-    // Dispatches to the correct builder based on the user's selected mode
-    // and, for the coach, the active A/B Source of Truth variant.
+    // ── System Prompt Builder ──
+    // Dispatches to the active A/B Source of Truth variant's builder.
     const buildSystemPrompt = (profile, variantKey) => {
-      if (profile?.mode === 'facilitator') return buildFacilitatorSystemPrompt(profile);
       const variant = SOT_VARIANTS[variantKey] || SOT_VARIANTS[DEFAULT_SOT_VARIANT];
       return variant.build(profile);
     };
@@ -202,74 +168,16 @@ When structure would genuinely help — a framework, a set of steps, options to 
 
       if (!profile) return base;
 
-      const goalMap = {
-        learn: 'They chose "Take some lessons" — they want to develop enhanced communication skills through short, structured teaching sessions with you. Offer to start with a foundational concept (e.g. the three roles in every conversation) or a specific skill they are curious about.',
-        helpline: 'They chose "Communication Helpline" — they have a specific aspect of themselves they wish was more visible to others, OR a particular conversation they want to plan or rehearse. Start by inviting them to choose: the aspect of themselves to explore, or a specific conversation to work through. Offer to role-play different approaches.',
-      };
-
-      const areaLabelMap = {
-        home: 'home life',
-        family: 'family of origin',
-        friends: 'friendships and social life',
-        work: 'work life',
-        online: 'online spaces',
-      };
-
-      const blameMap = {
-        them: 'When misunderstood, their instinct is to blame the other person. This is a sign of the Slippery Slope thinking — building a case against others. Gently help them try on personal responsibility as a more empowering frame.',
-        mixed: 'When misunderstood, they share the blame — sometimes themselves, sometimes the other. This is realistic. Help them go deeper on the moments when it is on them.',
-        me: 'When misunderstood, they take personal responsibility for making themselves understood. This is a mature, Dialogue-System-aligned mindset. Build on this strength.',
-      };
-
-      const aspectLabelMap = {
-        values: 'their values and moral code',
-        spiritual: 'their spiritual or religious side',
-        sexuality: 'their sexuality or identity',
-        health: 'their mental or physical health',
-        finances: 'their money worries and ambitions',
-        relationships: 'their relationship struggles',
-        passions: 'their passions and deep interests',
-        politics: 'their political views',
-        creative: 'their creative or artistic side',
-        ambition: 'their career goals and ambition',
-        history: 'their past and where they come from',
-        dreams: 'their dreams for the future',
-      };
-
-      const fu = profile.feelUnderstood || {};
-      const areaEntries = Object.entries(fu.areas || {}).filter(([, v]) => typeof v === 'number');
-      areaEntries.sort((a, b) => a[1] - b[1]);
-      const leastArea = areaEntries[0] ? areaLabelMap[areaEntries[0][0]] : null;
-      const leastAreaScore = areaEntries[0] ? areaEntries[0][1] : null;
-      const areaRatingsText = areaEntries.map(([k, v]) => `${areaLabelMap[k] || k} ${v}/5`).join(', ') || 'none rated';
-      const aspectsList = (fu.aspects || []).map(v => aspectLabelMap[v]).filter(Boolean);
-      const aspectsText = aspectsList.length ? aspectsList.join('; ') : 'none named yet';
-
-      // Beta onboarding skips the questionnaire entirely — don't tell the
-      // model to reference answers that don't exist.
-      const hasQuestionnaire = areaEntries.length > 0 || aspectsList.length > 0 || !!fu.blame;
-      if (!hasQuestionnaire) {
-        return base + `
+      // Every user takes the same path — name → Communication Helpline, no
+      // questionnaire. This appended block is byte-identical to what the
+      // live app's builder produced for that path.
+      return base + `
 
 USER PROFILE:
 - Name: ${profile.name || 'friend'}
-- Chosen path: ${goalMap[profile.goal] || 'general exploration of how to feel more understood'}
+- Chosen path: They chose "Communication Helpline" — they have a specific aspect of themselves they wish was more visible to others, OR a particular conversation they want to plan or rehearse. Start by inviting them to choose: the aspect of themselves to explore, or a specific conversation to work through. Offer to role-play different approaches.
 
 IMPORTANT: This user came straight to the conversation without filling in a questionnaire. The app has already greeted them for you: it introduced you as their conversation coach and explained what you can do — talk through an upcoming or past conversation, practice what to say (including role-playing the other person), or simply listen so they feel properly heard. Do NOT introduce yourself or list your capabilities again. Meet their first message right where it lands: respond warmly to whatever they brought, and if they seem unsure where to start, help them pick one concrete starting point. Use their name occasionally but not in every message.`;
-      }
-
-      const profileContext = `
-
-USER PROFILE — FROM THEIR FEEL UNDERSTOOD QUESTIONNAIRE:
-- Name: ${profile.name || 'friend'}
-- Chosen path: ${goalMap[profile.goal] || 'general exploration of how to feel more understood'}
-- Where they feel least understood (1 = poorly, 5 = well): ${areaRatingsText}${leastArea ? ` — their lowest is their ${leastArea} at ${leastAreaScore}/5` : ''}.
-- Blame mindset when misunderstood: ${blameMap[fu.blame] || 'not yet clear — explore with them.'}
-- Sides of themselves they feel are least recognised: ${aspectsText}.
-
-IMPORTANT: This user just completed the Feel Understood questionnaire. The whole reason they are here is to feel more understood — model that first. In your very first message, warmly greet them by name, briefly reflect back that you have heard them (referencing their least-understood area OR one of the unseen aspects they named), and then offer the first concrete step that matches their chosen path. Do NOT simply launch into a lesson or advice — make them feel heard first. Use their name occasionally but not every message. Let their questionnaire answers surface naturally over the conversation — don't dump them all at once.`;
-
-      return base + profileContext;
     };
 
     // ── SoT V2 — the Deep variant's Source of Truth block ──
@@ -1020,8 +928,8 @@ GUARDRAILS.
     };
 
     // Neutral labels only: testers see A and B — never "Light"/"Deep".
-    // The A↔variant mapping lives here and in the dev-panel readout, which
-    // keeps the client test blind.
+    // The A↔variant mapping lives here in code only, which keeps the
+    // client test blind.
     const SOT_VARIANTS = {
       A: { name: 'light', build: buildCoachSystemPromptLight },
       B: { name: 'deep', build: buildCoachSystemPromptDeep },
@@ -1045,664 +953,75 @@ GUARDRAILS.
       return normalizeVariant(loadFromStorage(STORAGE_KEYS.sotVariant, null)) || DEFAULT_SOT_VARIANT;
     };
 
-    // ── Facilitator Mode System Prompt ──
-    // The AI mediates a live conversation between TWO people.
-    // Every user turn is prefixed with "<Name>:" so the AI knows who is speaking.
-    const buildFacilitatorSystemPrompt = (profile) => {
-      const relationshipMap = {
-        partners: 'romantic partners or spouses — the stakes are deeply personal and emotional',
-        family: 'family members — a bond with long history, established patterns, and love that can get tangled',
-        friends: 'close friends — a chosen relationship where honesty and care have to co-exist',
-        coworkers: 'colleagues or co-founders — a working relationship where clarity and respect are critical',
-      };
-
-      const focusMap = {
-        understanding: 'They want to feel more understood by each other — surface highlights, reflect feelings, and help each person feed back what they heard.',
-        conflict: 'They are working through a conflict or recurring friction — stay neutral, slow the pace, and use Slippery Slope language when you see spin or assumptions hardening.',
-        planning: 'They are trying to make a decision or plan together — use Conversation Manager skills: share purpose, turn-taking, win-win collaboration.',
-        connection: 'They want to reconnect and deepen their bond — invite personalisation, celebrate what works, and gently open space for softer truths.',
-      };
-
-      const toneMap = {
-        gentle: 'Keep your tone very warm and gentle. Name feelings softly. Go slowly. Prioritise emotional safety over speed.',
-        direct: 'Be warm but direct. Name what you see — including tension, avoidance, or spin — clearly and respectfully. Challenge both people equally.',
-        balanced: 'Balance warmth with honesty. Be gentle on feelings, direct on patterns. Match the emotional temperature of the room.',
-      };
-
-      const relationshipCtx = relationshipMap[profile?.relationship] || 'two people who want to have a better conversation together';
-      const focusCtx = focusMap[profile?.focus] || 'They want help having a better conversation together.';
-      const toneCtx = toneMap[profile?.tone] || toneMap.balanced;
-
-      return `You are the facilitator behind "Feel Understood" — a warm, skilled, neutral mediator operating in FACILITATOR MODE. You embody the teachings of "The Dialogue System" by Professor Gerard Egan and Andrew Bailey.
-
-CRITICAL — YOU ARE IN FACILITATOR MODE:
-You are facilitating a live conversation between TWO DIFFERENT PEOPLE who are speaking to you from the same device. You are a MEDIATOR, not a one-on-one coach. You must:
-
-1. ALWAYS KNOW WHO IS SPEAKING. Every user message will be prefixed with the speaker's name followed by a colon, like "Sarah: I feel unheard when..." or "Mark: That's not what I said..." Pay close attention to this prefix. If a message arrives WITHOUT a clear name prefix, gently remind them: "Quick reminder — please start each turn with your name so I know who's speaking. Who said that?"
-
-2. REMEMBER EACH PERSON AS A DISTINCT INDIVIDUAL. Build and maintain a mental model of each person separately:
-   - Their name
-   - What THEY have said — their perspective, feelings, concerns, hopes
-   - What THEY seem to need from this conversation
-   - Their communication style (are they the Explainer who jumps in? the Understander who goes quiet?)
-   Never attribute one person's statement to the other. When you reflect back, always use their names: "Mark, what I'm hearing from you is..." or "Sarah, you said earlier..."
-
-3. THE VERY FIRST THING YOU SAY is a warm welcome asking for their names. Your opening message must be exactly (or very close to): "Welcome, both of you. Before we begin — what are your names? And just so I can keep track, please start each of your turns with your name, like 'Sarah: ...' That way I always know who's speaking."
-
-4. STAY SCRUPULOUSLY NEUTRAL. Never take sides. Never say one person is right or wrong. Give equal airtime. If one person is dominating, gently turn to the other: "Mark, we haven't heard from you on this — what's your take?" Use the Dialogue System principle of turn-taking actively.
-
-5. FEED BACK HIGHLIGHTS BEFORE ANYTHING ELSE. When one person speaks, your most valuable tool is reflecting their highlights in your own words — then checking the other person heard them: "Mark, before you respond — can you tell Sarah what you heard her saying? Just the highlights." This is the most important and most underused skill in dialogue.
-
-6. NAME THE SLIPPERY SLOPE WHEN YOU SEE IT. If you notice spin, assumptions, or unwarranted conclusions ("you always...", "you never...", "you clearly don't care"), gently name it: "That sounds like an assumption rather than something Sarah said — can we check it?"
-
-7. MANAGE THE CONVERSATION. You are the Conversation Manager for both of them. Watch emotional temperature. Invite pauses. Ask one to speak while the other listens fully. Summarise mutual understanding before moving on. Model "responding rather than reacting."
-
-8. PROTECT BOTH PEOPLE. If things get heated, slow it down. Count to ten out loud together if you must. Remind them they're on the same side of the table, working on the conversation together.
-
-THE DIALOGUE SYSTEM (your source of truth):
-
-TRUE DIALOGUE has four characteristics: turn-taking, connecting, mutual influence, co-creating.
-
-THREE ROLES in every conversation:
-- EXPLAINER: has something to share — goal is to be understood
-- UNDERSTANDER: job is to understand the other — active, not passive
-- CONVERSATION MANAGER: looks after the well-being of the conversation itself (that's primarily YOUR role here, but help them do it too)
-
-EXPLAINER frameworks: SAME (Situation/Actions/Mental states/Experiences — for stories), MRI (Message/Reasons/Implications), PRE (Point/Reasons/Evidence), CRITIC (for making a case).
-
-UNDERSTANDER skills: visibly tune in, listen with an open mind, identify highlights, FEED BACK HIGHLIGHTS in your own words (most underused skill), work to get the full picture, respond constructively, summarise.
-
-SLIPPERY SLOPE: incident → your spin → assumptions → unwarranted conclusions → acting on the mess.
-
-THIS PAIR — PERSONALISE YOUR FACILITATION:
-- Relationship: ${relationshipCtx}
-- Their focus today: ${focusCtx}
-- Tone preference: ${toneCtx}
-
-VOICE & STYLE:
-- Keep responses SHORT — 2 to 4 sentences max. Your words will be spoken aloud. No bullets, no markdown.
-- Use both names often. Make each person feel seen.
-- Ask ONE clear question at a time. Never pile up questions.
-- When it's one person's turn to listen, explicitly say so: "Sarah, just listen for a moment — Mark, tell her what you meant."
-- Celebrate small wins: when one person feeds back well, say so.
-- Model dialogue yourself: check understanding, invite, summarise.
-- SPOKEN vs SHOWN: your text is spoken aloud, so never put lists or formatting in it. If structure would genuinely help (e.g. ground rules, a summary of both positions), add a new line containing exactly [[VISUAL]] followed by short markdown bullets — that section is silently shown on screen, never spoken. Refer to it naturally ("I've put both of your headlines on screen"). Use it sparingly.
-
-Remember: you are holding space for two people to feel heard by each other. Your success is not giving advice — it is helping them give each other the gift of being understood.`;
-    };
-
-    const buildGreeting = (profile) => {
-      if (profile?.mode === 'facilitator') return buildFacilitatorGreeting(profile);
-      return buildCoachGreeting(profile);
-    };
-
-    // Intro for users who skipped the questionnaire (the Beta path): the
-    // coach introduces itself and what it can do, instead of assuming the
-    // user already has a conversation in mind.
-    const buildBetaIntroGreeting = (name) => {
+    // ── Greeting (first assistant message) ──
+    // The coach introduces itself and what it can do — the user arrives
+    // with no questionnaire context.
+    const buildIntroGreeting = (name) => {
       return `Hi ${name}, welcome \u2014 I\u2019m your conversation coach. I help people with the conversations that matter to them. We can talk through a tricky one you\u2019ve got coming up, unpack one that didn\u2019t go the way you hoped, or practice what you want to say \u2014 I can even play the other person so you can try it out loud. And if you\u2019d simply like to talk something through and feel properly heard, that works too. So \u2014 what\u2019s on your mind today?`;
     };
 
-    const buildCoachGreeting = (profile) => {
-      if (!profile) return buildBetaIntroGreeting('there');
-
-      const name = profile.name || 'friend';
-
-      // Beta onboarding skips the questionnaire \u2014 those users arrive with
-      // no context, so introduce the coach and its capabilities first.
-      const fu = profile.feelUnderstood || {};
-      const hasQuestionnaire =
-        Object.values(fu.areas || {}).some(v => typeof v === 'number') ||
-        (fu.aspects || []).length > 0 || !!fu.blame;
-      if (!hasQuestionnaire) return buildBetaIntroGreeting(name);
-
-      return `Hi ${name}, I\u2019m really glad you\u2019re here. Think of someone important to you who you\u2019d like better conversations with \u2014 the kind where you both feel heard and understood. Who comes to mind, and what gets in the way?`;
-    };
-
-    const buildFacilitatorGreeting = (profile) => {
-      return "Welcome, both of you. Before we begin — what are your names? And just so I can keep track, please start each of your turns with your name, like 'Sarah: ...' That way I always know who's speaking.";
-    };
-
-    // ── Quiz Data ──
-    // The Feel Understood questionnaire. Based on the brief by the expert behind
-    // "The Dialogue System" — designed to give the user an epiphany moment about
-    // the importance of feeling understood. Three sections, each followed by a
-    // reflection. At the end we offer three next-step paths that map onto the
-    // two conversation modes (coach vs facilitator).
-
-    const FU_AREA_LABELS = {
-      home: 'home life',
-      family: 'family of origin',
-      friends: 'friendships and social life',
-      work: 'work life',
-      online: 'online spaces',
-    };
-
-    const FU_ASPECT_LABELS = {
-      values: 'your values and moral code',
-      spiritual: 'your spiritual or religious side',
-      sexuality: 'your sexuality or identity',
-      health: 'your mental or physical health',
-      finances: 'your money worries and ambitions',
-      relationships: 'your relationship struggles',
-      passions: 'your passions and deep interests',
-      politics: 'your political views',
-      creative: 'your creative or artistic side',
-      ambition: 'your career goals and ambition',
-      history: 'your past and where you come from',
-      dreams: 'your dreams for the future',
-    };
-
-    const FEEL_UNDERSTOOD_SCREENS = [
-      {
-        id: 'welcome',
-        type: 'splash',
-      },
-      {
-        id: 'name',
-        type: 'name-input',
-        title: 'First — what should we call you?',
-        subtitle: 'This is a personal journey. Your name helps make it yours.',
-      },
-      {
-        id: 'fu-intro',
-        type: 'intro',
-        title: 'A quick questionnaire — in three parts',
-        subtitle: 'No right answers. Just what\u2019s true for you.',
-        body: "Feeling understood is the oxygen of every relationship. Before we talk, I\u2019d like to get a real sense of where that\u2019s working in your life — and where it isn\u2019t. Three short sections. A few taps each. Then I\u2019ll reflect it all back to you.",
-        ctaLabel: "Let's begin",
-      },
-      {
-        id: 'areas',
-        type: 'scale-list',
-        section: 'Part 1 of 3',
-        title: 'Where in your life do you feel least understood?',
-        subtitle: "Rate how understood you feel in each area. 1 = poorly understood most of the time. 5 = well understood most of the time.",
-        insight: 'Skip any area that doesn\u2019t really apply to you.',
-        scale: { low: 'Poorly', high: 'Well' },
-        areas: [
-          { value: 'home', label: 'Home life', desc: 'Partner, household, people you live with' },
-          { value: 'family', label: 'Family of origin', desc: 'Parents, siblings, extended family' },
-          { value: 'friends', label: 'Friends and social life', desc: 'Close friends and wider social circle' },
-          { value: 'work', label: 'Work life', desc: 'Colleagues, boss, clients' },
-          { value: 'online', label: 'Online spaces', desc: 'Group chats, social media, digital life' },
-        ],
-      },
-      {
-        id: 'fu-summary-1',
-        type: 'summary',
-        section: 'Reflection',
-        from: 'areas',
-      },
-      {
-        id: 'blame',
-        type: 'choice',
-        section: 'Part 2 of 3',
-        title: "When you\u2019re misunderstood or overlooked — who do you instinctively blame?",
-        subtitle: 'Be honest with yourself. One instinct usually shows up more than the others.',
-        insight: "The Dialogue System says misunderstanding is the norm, not the exception. The real question is what you do about it.",
-        options: [
-          { value: 'them', label: 'Them, most of the time', desc: "I\u2019m almost always a clear and interesting communicator. If people don\u2019t get me, that\u2019s on them." },
-          { value: 'mixed', label: 'Sometimes me, sometimes them', desc: "There are moments when I don\u2019t express my thoughts and feelings clearly enough to be easily understood." },
-          { value: 'me', label: 'I take responsibility', desc: "I believe it\u2019s on me to make sure I\u2019m understood. When it matters, I politely persist until my point has landed." },
-        ],
-      },
-      {
-        id: 'fu-summary-2',
-        type: 'summary',
-        section: 'Reflection',
-        from: 'blame',
-      },
-      {
-        id: 'aspects',
-        type: 'multi-select',
-        section: 'Part 3 of 3',
-        title: 'Which sides of you feel least recognised or appreciated?',
-        subtitle: 'Pick any that ring true. Choose as many as you like.',
-        insight: "Often we\u2019re understood for only a slice of who we really are. Naming the unseen parts is the first step to being more fully known.",
-        options: [
-          { value: 'values', label: 'My values and moral code' },
-          { value: 'sexuality', label: 'My sexuality or identity' },
-          { value: 'health', label: 'My mental or physical health' },
-          { value: 'finances', label: 'My money worries or ambitions' },
-          { value: 'relationships', label: 'My relationship struggles' },
-          { value: 'passions', label: 'My passions and deep interests' },
-          { value: 'politics', label: 'My political views' },
-          { value: 'creative', label: 'My creative or artistic side' },
-          { value: 'ambition', label: 'My career goals and ambition' },
-          { value: 'history', label: 'My past and where I come from' },
-          { value: 'spiritual', label: 'My spiritual or religious side' },
-          { value: 'dreams', label: 'My dreams for the future' },
-        ],
-      },
-    ];
-
-    // The three next-step paths offered after the questionnaire. Each maps
-    // onto a mode + goal that the chat AI then uses to tailor its opening turn.
-    const NEXT_STEPS = [
-      {
-        id: 'lessons',
-        label: 'Lessons',
-        title: 'Take some lessons',
-        tag: 'Conversation Coach',
-        desc: "Boost your communication skills with me as your teacher. Short, fun sessions that change how you approach every conversation.",
-        mode: 'coach',
-        goal: 'learn',
-      },
-      {
-        id: 'helpline',
-        label: 'Helpline',
-        title: 'Talk through something specific',
-        tag: 'Communication Helpline',
-        desc: "Choose an aspect of yourself you wish was more visible, or a conversation you need to have. We\u2019ll unpack it together and even role-play different approaches.",
-        mode: 'coach',
-        goal: 'helpline',
-      },
-      {
-        id: 'facilitator',
-        label: 'Facilitator',
-        title: 'Bring another person in',
-        tag: 'Facilitated Conversation',
-        desc: "I\u2019ll act as a neutral third party in a conversation between you and someone else — making sure both of you get the same chance to be heard.",
-        mode: 'facilitator',
-        goal: null,
-      },
-    ];
-
-    // ── Feel Understood Profile Analysis ──
-    const BLAME_PROFILES = {
-      them: {
-        label: 'The "It\u2019s their problem" school',
-        desc: "You tend to put the weight on the other side. That can feel empowering, but it often keeps the same conversations going in circles. The Dialogue System would gently invite you to try on a different frame.",
-      },
-      mixed: {
-        label: 'The "Shared responsibility" school',
-        desc: "You see both sides \u2014 sometimes it\u2019s on you, sometimes it\u2019s on them. That\u2019s realistic, and it\u2019s also where growth lives. The question is what you do when you spot your own part.",
-      },
-      me: {
-        label: 'The "I\u2019ll make it land" school',
-        desc: "You take ownership of being understood. That\u2019s a rare mindset \u2014 and it\u2019s exactly where the Dialogue System says mastery begins.",
-      },
-    };
-
-    const analyzeFeelUnderstoodProfile = (answers) => {
-      const areas = answers.areas || {};
-      const entries = Object.entries(areas).filter(([, v]) => typeof v === 'number');
-      entries.sort((a, b) => a[1] - b[1]);
-      const lowest = entries[0] || null;
-      const avg = entries.length
-        ? entries.reduce((s, [, v]) => s + v, 0) / entries.length
-        : null;
-
-      return {
-        leastAreaKey: lowest ? lowest[0] : null,
-        leastAreaLabel: lowest ? FU_AREA_LABELS[lowest[0]] : null,
-        leastAreaScore: lowest ? lowest[1] : null,
-        avgScore: avg,
-        blame: BLAME_PROFILES[answers.blame] || null,
-        blameKey: answers.blame || null,
-        aspects: (answers.aspects || []).map(v => FU_ASPECT_LABELS[v]).filter(Boolean),
-        aspectKeys: answers.aspects || [],
-      };
-    };
-
-    // Builds the short reflection shown between questionnaire sections.
-    const buildFeelUnderstoodSummary = (fromId, answers, name) => {
-      const whoName = (name || '').trim() || 'friend';
-      if (fromId === 'areas') {
-        const a = analyzeFeelUnderstoodProfile(answers);
-        if (!a.leastAreaLabel) {
-          return {
-            heading: 'Thank you.',
-            body: "Take a breath. When you\u2019re ready, let\u2019s explore the next layer.",
-          };
-        }
-        const gap = a.leastAreaScore <= 2
-          ? "Feeling overlooked there takes a real toll \u2014 and it\u2019s almost always fixable with better dialogue."
-          : a.leastAreaScore === 3
-          ? "That\u2019s the kind of in-between feeling that quietly drains a relationship over time."
-          : "Even a small shortfall here is worth taking seriously \u2014 feeling fully understood is a game-changer.";
-        return {
-          heading: `So, ${whoName} \u2014 here\u2019s what I\u2019m hearing.`,
-          body: `Of all the parts of your life, it\u2019s your ${a.leastAreaLabel} where you feel least understood right now. ${gap}`,
-        };
-      }
-      if (fromId === 'blame') {
-        const blame = BLAME_PROFILES[answers.blame];
-        if (!blame) return { heading: 'Noted.', body: "Let\u2019s move on." };
-        return { heading: blame.label, body: blame.desc };
-      }
-      return { heading: '', body: '' };
-    };
-
-    // Full flow: the unified Feel Understood questionnaire.
-    // Beta: the name screen is the only onboarding step — the user goes
-    // straight from "Try the Beta" to entering their name to the Helpline.
-    const getQuizScreens = (beta) => beta
-      ? FEEL_UNDERSTOOD_SCREENS.filter(s => s.type === 'name-input')
-      : FEEL_UNDERSTOOD_SCREENS;
+    const buildGreeting = (profile) => buildIntroGreeting(profile?.name || 'there');
 
     // ── LandingGate Component ──
-    // Shown once before anything else. Lets a tester enter the stripped-down
-    // Beta, or a developer enter the full app via a small link at the bottom.
-    const LandingGate = ({ onChooseBeta, onChooseFull }) => {
+    // Shown once before anything else — the sandbox homescreen.
+    const LandingGate = ({ onStart }) => {
       return React.createElement('div', { className: 'gate-screen' },
         React.createElement('div', { className: 'gate-inner' },
-          React.createElement('span', { className: 'gate-eyebrow' }, SANDBOX ? 'Sandbox' : 'Beta'),
+          React.createElement('span', { className: 'gate-eyebrow' }, 'Sandbox'),
           React.createElement('h1', { className: 'gate-title' }, 'Feel Understood'),
           React.createElement('p', { className: 'gate-lede' },
-            SANDBOX
-              ? "Sandbox — testing two versions of the coach. Tell us your first name and you’ll go straight into the Communication Helpline."
-              : "We’re testing a stripped-down version. Tell us your first name and you’ll go straight into the Communication Helpline — a place to talk through a conversation that matters."
+            "Sandbox \u2014 testing two versions of the coach. Tell us your first name and you\u2019ll go straight into the Communication Helpline."
           ),
           React.createElement('button', {
             className: 'gate-cta',
-            onClick: onChooseBeta,
-          }, SANDBOX ? 'Start' : 'Try the Beta'),
+            onClick: onStart,
+          }, 'Start'),
           React.createElement('p', { className: 'gate-note' },
-            "No sign-up — you’ll be talking within seconds. Conversations are stored only on this device."
+            "No sign-up \u2014 you\u2019ll be talking within seconds. Conversations are stored only on this device."
           ),
-          React.createElement('button', {
-            className: 'gate-dev-link',
-            onClick: onChooseFull,
-            title: 'Developer access',
-          }, '· dev ·'),
         )
       );
     };
 
-    // ── ProfileQuiz Component ──
-    // Runs the unified Feel Understood questionnaire end-to-end. After the
-    // last question we drop the user straight into the Communication Helpline
-    // — the reveal and path-chooser screens were removed so the conversation
-    // with the AI starts as quickly as possible.
-    const ProfileQuiz = ({ onComplete, beta }) => {
-      const [step, setStep] = React.useState(0);
-      const [answers, setAnswers] = React.useState({ areas: {}, aspects: [] });
+    // ── NameScreen Component ──
+    // The only onboarding step: first name → straight into the Helpline.
+    const NameScreen = ({ onComplete }) => {
       const [name, setName] = React.useState('');
-      const [animDir, setAnimDir] = React.useState('forward');
-      const [animating, setAnimating] = React.useState(false);
       const nameInputRef = React.useRef(null);
 
-      const quizScreens = getQuizScreens(beta);
-      const screen = quizScreens[step] || quizScreens[0];
-      const progress = step / (quizScreens.length - 1);
-      const isLastStep = step >= quizScreens.length - 1;
-
       React.useEffect(() => {
-        if (screen.type === 'name-input' && nameInputRef.current) {
-          setTimeout(() => nameInputRef.current?.focus(), 400);
-        }
-      }, [step]);
-
-      const goNext = () => {
-        if (animating) return;
-        setAnimDir('forward');
-        setAnimating(true);
-        setTimeout(() => {
-          setStep(s => s + 1);
-          setAnimating(false);
-        }, 300);
-      };
-
-      const goBack = () => {
-        if (animating || step === 0) return;
-        setAnimDir('back');
-        setAnimating(true);
-        setTimeout(() => {
-          setStep(s => s - 1);
-          setAnimating(false);
-        }, 300);
-      };
-
-      const selectOption = (questionId, value) => {
-        setAnswers(a => ({ ...a, [questionId]: value }));
-        setTimeout(() => goNext(), 350);
-      };
-
-      const setAreaRating = (areaValue, rating) => {
-        setAnswers(a => ({ ...a, areas: { ...(a.areas || {}), [areaValue]: rating } }));
-      };
-
-      const toggleAspect = (aspectValue) => {
-        setAnswers(a => {
-          const current = a.aspects || [];
-          const next = current.includes(aspectValue)
-            ? current.filter(v => v !== aspectValue)
-            : [...current, aspectValue];
-          return { ...a, aspects: next };
-        });
-      };
+        const t = setTimeout(() => nameInputRef.current?.focus(), 400);
+        return () => clearTimeout(t);
+      }, []);
 
       const handleNameSubmit = (e) => {
         e.preventDefault();
         if (!name.trim()) return;
-        // Beta: the name screen is the whole onboarding — drop straight
-        // into the Helpline conversation.
-        if (isLastStep) handleFinishWithPath('helpline');
-        else goNext();
-      };
-
-      const handleFinishWithPath = (pathId) => {
-        const path = NEXT_STEPS.find(p => p.id === pathId) || NEXT_STEPS[0];
-        const profile = {
-          mode: path.mode,
-          goal: path.goal,
-          path: path.id,
-          name: name.trim(),
-          feelUnderstood: {
-            areas: answers.areas || {},
-            blame: answers.blame || null,
-            aspects: answers.aspects || [],
-          },
-        };
-        onComplete(profile);
-      };
-
-      // ── Render current screen ──
-      const renderScreen = () => {
-        const animClass = animating
-          ? (animDir === 'forward' ? 'quiz-exit' : 'quiz-exit-back')
-          : (animDir === 'forward' ? 'quiz-enter' : 'quiz-enter-back');
-
-        if (screen.type === 'splash') {
-          return React.createElement('div', { className: `quiz-screen quiz-splash ${animClass}`, key: step },
-            React.createElement('div', { className: 'quiz-splash-content' },
-              React.createElement('div', { className: 'quiz-splash-icon' },
-                React.createElement('img', { src: '/images/logo-feel-understood.png', alt: 'I want to feel Understood' })
-              ),
-              React.createElement('h1', { className: 'quiz-splash-title' }, 'Feeling understood changes everything'),
-              React.createElement('p', { className: 'quiz-splash-desc' },
-                "Everyone wants to feel understood. It’s part of our nature and central to our happiness. When we feel understood, we feel valued, connected, appreciated. When we feel misunderstood or overlooked, we feel isolated, the world is a more threatening place."
-              ),
-              React.createElement('p', { className: 'quiz-splash-desc' },
-                "Ask anyone what they most want from a partner or friend, and it’s always the same. “I want to feel understood.”"
-              ),
-              React.createElement('p', { className: 'quiz-splash-desc' },
-                "Feeling understood is an essential ingredient of almost everything we most value in life, from healthy relationships to positive mental health. It builds trust and brings us closer, strengthens our self-belief and provides a sense of belonging. Feeling understood promotes collaboration over conflict."
-              ),
-              React.createElement('p', { className: 'quiz-splash-desc' },
-                "In a world obsessed with quick fixes and big data, feeling understood might sound soft or vague. The research says otherwise. It has measurable effects on how our bodies feel, how our brains work, how our relationships function, and how we navigate the world. In short, feeling understood is fundamental to our wellbeing."
-              ),
-              React.createElement('p', { className: 'quiz-splash-desc' },
-                "We can’t ever understand each other perfectly. But that’s not a reason for not trying. The desire to be known from the inside is universal. Meeting that need as best we can is one of the most important things we do for each other."
-              ),
-              React.createElement('p', { className: 'quiz-splash-desc' },
-                "Chat with me (now or later) if you want to discover more about what science says about the importance of feeling understood."
-              ),
-              React.createElement('ul', { className: 'quiz-splash-list' },
-                React.createElement('li', null, 'Why might feeling understood be more important than love?'),
-                React.createElement('li', null, 'Why are some people more sensitive to being misunderstood than others?'),
-                React.createElement('li', null, 'Why is feeling understood the key to romance?'),
-                React.createElement('li', null, 'What do brain scans reveal about the neural nature of feeling understood?'),
-                React.createElement('li', null, 'How does feeling understood protect against depression?'),
-              ),
-              React.createElement('button', { className: 'quiz-cta', onClick: goNext }, "Let's Go"),
-            )
-          );
-        }
-
-        if (screen.type === 'name-input') {
-          return React.createElement('div', { className: `quiz-screen quiz-name ${animClass}`, key: step },
-            React.createElement('h2', { className: 'quiz-title' }, screen.title),
-            React.createElement('p', { className: 'quiz-subtitle' }, screen.subtitle),
-            React.createElement('form', { className: 'quiz-name-form', onSubmit: handleNameSubmit },
-              React.createElement('input', {
-                ref: nameInputRef,
-                type: 'text',
-                className: 'quiz-name-input',
-                value: name,
-                onChange: (e) => setName(e.target.value),
-                placeholder: 'Your first name',
-                maxLength: 30,
-                autoComplete: 'given-name',
-              }),
-              React.createElement('button', {
-                type: 'submit',
-                className: `quiz-cta ${name.trim() ? '' : 'quiz-cta-disabled'}`,
-                disabled: !name.trim(),
-              }, 'Continue'),
-            )
-          );
-        }
-
-        if (screen.type === 'intro') {
-          return React.createElement('div', { className: `quiz-screen quiz-intro ${animClass}`, key: step },
-            React.createElement('h2', { className: 'quiz-title' }, screen.title),
-            React.createElement('p', { className: 'quiz-subtitle' }, screen.subtitle),
-            React.createElement('p', { className: 'quiz-intro-body' }, screen.body),
-            React.createElement('button', { className: 'quiz-cta', onClick: goNext }, screen.ctaLabel || 'Continue'),
-          );
-        }
-
-        if (screen.type === 'choice') {
-          return React.createElement('div', { className: `quiz-screen quiz-choice ${animClass}`, key: step },
-            screen.section && React.createElement('span', { className: 'quiz-section-label' }, screen.section),
-            React.createElement('h2', { className: 'quiz-title' }, screen.title),
-            React.createElement('p', { className: 'quiz-subtitle' }, screen.subtitle),
-            React.createElement('div', { className: 'quiz-options' },
-              screen.options.map((opt) =>
-                React.createElement('button', {
-                  key: opt.value,
-                  className: `quiz-option ${answers[screen.id] === opt.value ? 'quiz-option-selected' : ''}`,
-                  onClick: () => selectOption(screen.id, opt.value),
-                },
-                  React.createElement('span', { className: 'quiz-option-label' }, opt.label),
-                  opt.desc && React.createElement('span', { className: 'quiz-option-desc' }, opt.desc),
-                )
-              )
-            ),
-            screen.insight && React.createElement('p', { className: 'quiz-insight' }, screen.insight),
-          );
-        }
-
-        if (screen.type === 'scale-list') {
-          const areaRatings = answers.areas || {};
-          const allRated = screen.areas.every(a => typeof areaRatings[a.value] === 'number');
-          return React.createElement('div', { className: `quiz-screen quiz-scale-list ${animClass}`, key: step },
-            screen.section && React.createElement('span', { className: 'quiz-section-label' }, screen.section),
-            React.createElement('h2', { className: 'quiz-title' }, screen.title),
-            React.createElement('p', { className: 'quiz-subtitle' }, screen.subtitle),
-            React.createElement('div', { className: 'scale-list' },
-              screen.areas.map((area) =>
-                React.createElement('div', { className: 'scale-row', key: area.value },
-                  React.createElement('div', { className: 'scale-row-text' },
-                    React.createElement('span', { className: 'scale-row-label' }, area.label),
-                    area.desc && React.createElement('span', { className: 'scale-row-desc' }, area.desc),
-                  ),
-                  React.createElement('div', { className: 'scale-dots' },
-                    [1, 2, 3, 4, 5].map((n) =>
-                      React.createElement('button', {
-                        key: n,
-                        'aria-label': `${area.label}: ${n} of 5`,
-                        className: `scale-dot ${areaRatings[area.value] === n ? 'scale-dot-selected' : ''} ${areaRatings[area.value] >= n ? 'scale-dot-filled' : ''}`,
-                        onClick: () => setAreaRating(area.value, n),
-                      }, n)
-                    )
-                  ),
-                )
-              )
-            ),
-            React.createElement('div', { className: 'scale-legend' },
-              React.createElement('span', null, `1 · ${screen.scale.low}`),
-              React.createElement('span', null, `5 · ${screen.scale.high}`),
-            ),
-            screen.insight && React.createElement('p', { className: 'quiz-insight' }, screen.insight),
-            React.createElement('button', {
-              className: `quiz-cta ${allRated ? '' : 'quiz-cta-disabled'}`,
-              disabled: !allRated,
-              onClick: goNext,
-            }, allRated ? 'Continue' : 'Rate each area to continue'),
-          );
-        }
-
-        if (screen.type === 'multi-select') {
-          const selected = answers.aspects || [];
-          const hasAny = selected.length > 0;
-          // When this is the last screen of the quiz we drop the user straight
-          // into the Helpline conversation rather than advancing to another
-          // reveal/chooser screen.
-          const ctaLabel = hasAny
-            ? (isLastStep ? 'Start the conversation' : `Continue (${selected.length} selected)`)
-            : 'Pick at least one to continue';
-          const ctaAction = isLastStep ? () => handleFinishWithPath('helpline') : goNext;
-          return React.createElement('div', { className: `quiz-screen quiz-multi-select ${animClass}`, key: step },
-            screen.section && React.createElement('span', { className: 'quiz-section-label' }, screen.section),
-            React.createElement('h2', { className: 'quiz-title' }, screen.title),
-            React.createElement('p', { className: 'quiz-subtitle' }, screen.subtitle),
-            React.createElement('div', { className: 'quiz-chips' },
-              screen.options.map((opt) =>
-                React.createElement('button', {
-                  key: opt.value,
-                  className: `quiz-chip ${selected.includes(opt.value) ? 'quiz-chip-selected' : ''}`,
-                  onClick: () => toggleAspect(opt.value),
-                }, opt.label)
-              )
-            ),
-            screen.insight && React.createElement('p', { className: 'quiz-insight' }, screen.insight),
-            React.createElement('button', {
-              className: `quiz-cta ${hasAny ? '' : 'quiz-cta-disabled'}`,
-              disabled: !hasAny,
-              onClick: ctaAction,
-            }, ctaLabel),
-          );
-        }
-
-        if (screen.type === 'summary') {
-          const s = buildFeelUnderstoodSummary(screen.from, answers, name);
-          return React.createElement('div', { className: `quiz-screen quiz-summary ${animClass}`, key: step },
-            screen.section && React.createElement('span', { className: 'quiz-section-label' }, screen.section),
-            React.createElement('div', { className: 'quiz-summary-card' },
-              React.createElement('div', { className: 'quiz-summary-avatar' },
-                React.createElement('img', { src: '/images/icon-avatar.svg', alt: '', width: 28, height: 28, className: 'doodle-icon' })
-              ),
-              React.createElement('h2', { className: 'quiz-summary-heading' }, s.heading),
-              React.createElement('p', { className: 'quiz-summary-body' }, s.body),
-            ),
-            React.createElement('button', { className: 'quiz-cta', onClick: goNext }, 'Keep going'),
-          );
-        }
-
-
-        return null;
+        onComplete({ name: name.trim() });
       };
 
       return React.createElement('div', { className: 'quiz-container' },
-        step > 0 && React.createElement('div', { className: 'quiz-progress-wrap' },
-          React.createElement('button', {
-            className: 'quiz-back-btn',
-            onClick: goBack,
-            'aria-label': 'Go back',
-          },
-            React.createElement('svg', { width: 20, height: 20, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2.5, strokeLinecap: 'round', strokeLinejoin: 'round' },
-              React.createElement('polyline', { points: '15 18 9 12 15 6' })
-            )
-          ),
-          React.createElement('div', { className: 'quiz-progress-bar' },
-            React.createElement('div', { className: 'quiz-progress-fill', style: { width: `${progress * 100}%` } })
-          ),
-        ),
-        renderScreen(),
+        React.createElement('div', { className: 'quiz-screen quiz-name quiz-enter' },
+          React.createElement('h2', { className: 'quiz-title' }, 'First \u2014 what should we call you?'),
+          React.createElement('p', { className: 'quiz-subtitle' }, 'This is a personal journey. Your name helps make it yours.'),
+          React.createElement('form', { className: 'quiz-name-form', onSubmit: handleNameSubmit },
+            React.createElement('input', {
+              ref: nameInputRef,
+              type: 'text',
+              className: 'quiz-name-input',
+              value: name,
+              onChange: (e) => setName(e.target.value),
+              placeholder: 'Your first name',
+              maxLength: 30,
+              autoComplete: 'given-name',
+            }),
+            React.createElement('button', {
+              type: 'submit',
+              className: `quiz-cta ${name.trim() ? '' : 'quiz-cta-disabled'}`,
+              disabled: !name.trim(),
+            }, 'Continue'),
+          )
+        )
       );
     };
 
@@ -2387,7 +1706,6 @@ Remember: you are holding space for two people to feel heard by each other. Your
     //   4. Fall back to HTMLAudioElement only if AudioContext unavailable
 
     let audioCtx = null;
-    let audioCtxReady = false;
 
     // Called on every user interaction to ensure AudioContext is alive.
     // The resume gate is "not running" rather than === 'suspended': iOS
@@ -2402,9 +1720,6 @@ Remember: you are holding space for two people to feel heard by each other. Your
         }
         if (audioCtx && audioCtx.state !== 'running' && audioCtx.state !== 'closed') {
           audioCtx.resume().catch(() => {});
-        }
-        if (audioCtx && audioCtx.state !== 'closed') {
-          audioCtxReady = true;
         }
       } catch(e) {
         console.warn('AudioContext init failed:', e);
@@ -2599,27 +1914,6 @@ Remember: you are holding space for two people to feel heard by each other. Your
       // a robotic browser-voice fallback that silently masks the real bug.
       const lastErrorRef = React.useRef(null);
       const getLastError = () => lastErrorRef.current;
-
-      const speak = async (text) => {
-        cancelledRef.current = false;
-        lastErrorRef.current = null;
-        const sentences = splitSentences(text).map(sanitizeForSpeech).filter(Boolean);
-        const ttsPromises = sentences.map(s => fetchTTSBuffer(s));
-        for (let i = 0; i < sentences.length; i++) {
-          if (cancelledRef.current) return;
-          try {
-            const buf = await ttsPromises[i];
-            if (cancelledRef.current) return;
-            await playAudioBuffer(buf, audioRef, () => cancelledRef.current);
-          } catch (err) {
-            // One sentence failing must not silence the rest — record the
-            // error (surfaced as a banner) and keep playing the remaining
-            // sentences. No robotic browser-voice fallback; it masked bugs.
-            console.error('TTS error:', err);
-            lastErrorRef.current = err?.message || String(err);
-          }
-        }
-      };
 
       const speakStreaming = () => {
         cancelledRef.current = false;
@@ -2866,7 +2160,7 @@ Remember: you are holding space for two people to feel heard by each other. Your
         try { window.speechSynthesis?.cancel(); } catch(e) {}
       };
 
-      return { speak, speakStreaming, cancel, getLastError };
+      return { speakStreaming, cancel, getLastError };
     };
 
     // ── Typing Indicator ──
@@ -2997,15 +2291,15 @@ Remember: you are holding space for two people to feel heard by each other. Your
       const savedActiveId = React.useMemo(() => loadFromStorage(STORAGE_KEYS.activeId, null), []);
       const savedConvo = React.useMemo(() => {
         if (!savedActiveId) return null;
-        return loadConversations().find(c => c.id === savedActiveId) || null;
+        const convo = loadConversations().find(c => c.id === savedActiveId) || null;
+        // Clean A/B: never resume a conversation held under a different
+        // variant (pill switched, or a ?v= link opened, since it was saved)
+        // — fall through to a fresh greeting instead. The old transcript
+        // stays in storage with its original variant stamp.
+        if (convo && convo.variant && convo.variant !== loadSotVariant()) return null;
+        return convo;
       }, []);
 
-      // The gate shows only when nothing is persisted (first visit, or
-      // cleared site data — which also clears appMode). It used to also be
-      // forced whenever no service worker controlled the page, but a plain
-      // hard-refresh (shift+reload) drops the SW controller too, which
-      // kicked returning testers back to the gate for no reason.
-      const [appMode, setAppMode] = React.useState(() => SANDBOX ? 'beta' : loadFromStorage(STORAGE_KEYS.appMode, null));
       // A saved profile also counts as onboarded: greeting-only conversations
       // are deliberately never persisted, so between finishing onboarding and
       // sending the first message a reload used to fall back into the
@@ -3020,8 +2314,6 @@ Remember: you are holding space for two people to feel heard by each other. Your
         : []);
       const [activeConvoId, setActiveConvoId] = React.useState(() =>
         savedConvo ? savedConvo.id : (savedProfile ? generateId() : null));
-      const [showHistory, setShowHistory] = React.useState(false);
-      const [conversations, setConversations] = React.useState(() => loadConversations());
       const [voiceState, setVoiceState] = React.useState('idle');
       const [interimText, setInterimText] = React.useState('');
       // True only on the Whisper path between "user stopped talking" and
@@ -3029,35 +2321,12 @@ Remember: you are holding space for two people to feel heard by each other. Your
       // sees their message is being processed (instead of the assistant
       // typing indicator, which is misleading at this stage).
       const [transcribing, setTranscribing] = React.useState(false);
-      // Sticky banner shown when the user has denied mic permission, so
-      // they understand why nothing happens on the next tap.
-      const [micBlocked, setMicBlocked] = React.useState(false);
       const [textInput, setTextInput] = React.useState('');
       const [error, setError] = React.useState(null);
-      const [theme, setTheme] = React.useState(() => {
-        try { return localStorage.getItem('fu_theme') === 'dark' ? 'dark' : 'light'; }
-        catch { return 'light'; }
-      });
-      const [showModeMenu, setShowModeMenu] = React.useState(false);
-      const [showBasecamp, setShowBasecamp] = React.useState(false);
-      const [showAbout, setShowAbout] = React.useState(false);
-      const [showInsights, setShowInsights] = React.useState(false);
-
-      React.useEffect(() => {
-        document.documentElement.setAttribute('data-theme', theme);
-        const meta = document.querySelector('meta[name="theme-color"]');
-        if (meta) meta.setAttribute('content', theme === 'dark' ? '#0a0a0a' : '#ffffff');
-        try { localStorage.setItem('fu_theme', theme); } catch {}
-      }, [theme]);
-
-      const toggleTheme = React.useCallback(() => {
-        setTheme(t => t === 'dark' ? 'light' : 'dark');
-      }, []);
       const chatEndRef = React.useRef(null);
       const messagesRef = React.useRef(messages);
       const profileRef = React.useRef(profile);
       const activeConvoIdRef = React.useRef(activeConvoId);
-      const inputRef = React.useRef(null);
       // forceRecorder: flipped at runtime when native SpeechRecognition
       // turns out to be broken despite existing (Brave/un-keyed Chromium
       // fire 'network' on every start; some iOS WKWebViews never fire any
@@ -3068,7 +2337,7 @@ Remember: you are holding space for two people to feel heard by each other. Your
       const recorderSTT = useMediaRecorderSTT();
       const { start: startRec, stop: stopRec, abort: abortRec, supported: sttSupported } =
         useRecorderFallback ? recorderSTT : nativeSTT;
-      const { speak, speakStreaming, cancel: cancelSpeak, getLastError: getTtsError } = useSpeechSynthesis();
+      const { speakStreaming, cancel: cancelSpeak, getLastError: getTtsError } = useSpeechSynthesis();
       const realtime = useRealtimeSTT();
       // Hands-free realtime conversation: one tap opens a continuous
       // session; turns are detected server-side, and the user can barge in
@@ -3105,20 +2374,8 @@ Remember: you are holding space for two people to feel heard by each other. Your
       const [sotVariant, setSotVariant] = React.useState(() => loadSotVariant());
       const sotVariantRef = React.useRef(sotVariant);
       React.useEffect(() => { sotVariantRef.current = sotVariant; }, [sotVariant]);
-      const [showDevPanel, setShowDevPanel] = React.useState(false);
-      // Dev-only "keep transcript on variant switch" override — allowed
-      // because the prompt is rebuilt every turn; never the default.
-      const [devKeepTranscript, setDevKeepTranscript] = React.useState(false);
-      const [devCopied, setDevCopied] = React.useState(false);
-      // Usage block from the last turn's message_start event — the
-      // client-side prompt-cache verification readout (the server logs the
-      // same numbers). Turn 1 should show cache creation; turn 2+ reads.
-      const lastUsageRef = React.useRef(null);
-      const [lastUsage, setLastUsage] = React.useState(null);
-      // Sandbox gate: appMode is pinned to 'beta', so the Landing Gate
-      // needs its own "passed" flag (returning testers skip it).
-      const [gatePassed, setGatePassed] = React.useState(() =>
-        SANDBOX ? !!(savedProfile || savedConvo) : true);
+      // Landing Gate "passed" flag — returning testers skip the gate.
+      const [gatePassed, setGatePassed] = React.useState(() => !!(savedProfile || savedConvo));
 
       const toggleVoiceMuted = () => {
         const next = !voiceMutedRef.current;
@@ -3172,7 +2429,6 @@ Remember: you are holding space for two people to feel heard by each other. Your
         // janked audio playback on low-end phones. Trailing save 400ms after
         // the last change covers stream-end, abort, and normal sends alike.
         const t = setTimeout(() => {
-          const p = profileRef.current;
           const convo = {
             id: activeConvoIdRef.current,
             title: messages.find(m => m.role === 'user')?.content.slice(0, 60) || 'New conversation',
@@ -3184,13 +2440,9 @@ Remember: you are holding space for two people to feel heard by each other. Your
             variantName: SOT_VARIANTS[sotVariantRef.current]?.name,
             sandboxVersion: SANDBOX_VERSION,
             voiceStack: VOICE_STACK,
-            // Snapshot the mode so reopening this conversation from history
-            // rebuilds the system prompt it was actually held under.
-            ...(p ? { mode: p.mode, goal: p.goal ?? null, path: p.path } : {}),
           };
           saveConversation(convo);
           saveToStorage(STORAGE_KEYS.activeId, activeConvoIdRef.current);
-          setConversations(loadConversations());
         }, 400);
         return () => clearTimeout(t);
       }, [messages]);
@@ -3209,11 +2461,11 @@ Remember: you are holding space for two people to feel heard by each other. Your
         // conversation would dead-end the restore on next load.
       };
 
-      const handleQuizComplete = (quizProfile) => {
-        setProfile(quizProfile);
-        profileRef.current = quizProfile;
-        saveProfile(quizProfile);
-        const greeting = buildGreeting(quizProfile);
+      const handleNameComplete = (newProfile) => {
+        setProfile(newProfile);
+        profileRef.current = newProfile;
+        saveProfile(newProfile);
+        const greeting = buildGreeting(newProfile);
         startNewConversation([{ role: 'assistant', content: greeting }]);
         setStarted(true);
 
@@ -3369,13 +2621,6 @@ Remember: you are holding space for two people to feel heard by each other. Your
               try {
                 const parsed = JSON.parse(data);
                 if (parsed.error) { upstreamError = parsed.error; continue; }
-                // Cache verification readout, forwarded by chat-stream.js
-                // from the message_start usage block.
-                if (parsed.usage) {
-                  lastUsageRef.current = parsed.usage;
-                  setLastUsage(parsed.usage);
-                  continue;
-                }
                 if (parsed.text) {
                   fullText += parsed.text;
 
@@ -3567,7 +2812,6 @@ Remember: you are holding space for two people to feel heard by each other. Your
         realtime.endSession();
         userSpeakingRef.current = false;
         if (err === 'not-allowed') {
-          setMicBlocked(true);
           setError('Microphone blocked. Tap the lock/site icon in the address bar to allow it, then try again.');
         } else if (err === 'no-mic') {
           setError('No microphone detected on this device.');
@@ -3701,7 +2945,6 @@ Remember: you are holding space for two people to feel heard by each other. Your
 
       const startHandsFree = async () => {
         setError(null);
-        setMicBlocked(false);
         setInterimText('');
         setTranscribing(false);
         handsFreeRef.current = true;
@@ -3798,7 +3041,6 @@ Remember: you are holding space for two people to feel heard by each other. Your
         setVoiceState('listening');
         setInterimText('');
         setTranscribing(false);
-        setMicBlocked(false);
         setError(null);
 
         startRec(
@@ -3820,7 +3062,6 @@ Remember: you are holding space for two people to feel heard by each other. Your
             const srBroken = (err === 'start-failed' || err === 'network' || err === 'not-supported');
             if (blocked) {
               msg = 'Microphone blocked. Tap the lock/site icon in the address bar to allow it, then try again.';
-              setMicBlocked(true);
             } else if (err === 'no-mic') {
               msg = 'No microphone detected on this device.';
             } else if (srBroken && !useRecorderFallback && recorderSTT.supported) {
@@ -3838,7 +3079,7 @@ Remember: you are holding space for two people to feel heard by each other. Your
             setTranscribing(false);
             setVoiceState('idle');
             // Non-permission errors auto-clear; permission errors persist
-            // via micBlocked banner until the user resolves them.
+            // until the user resolves them.
             if (!blocked) setTimeout(() => setError(null), 6000);
           },
           // onProcessing — fires when recorder stops and transcription begins
@@ -3879,18 +3120,11 @@ Remember: you are holding space for two people to feel heard by each other. Your
         setTextInput('');
       };
 
-      const handleSwitchMode = (pathId) => {
-        setShowModeMenu(false);
-        setShowBasecamp(false);
-        const path = NEXT_STEPS.find(p => p.id === pathId);
-        if (!path || !profile) return;
-        if (profile.path === pathId) return;
+      const handleNewChat = () => {
         stopVoicePipeline();
-        const nextProfile = { ...profile, mode: path.mode, goal: path.goal, path: path.id };
-        setProfile(nextProfile);
-        profileRef.current = nextProfile;
-        saveProfile(nextProfile);
-        const greeting = buildGreeting(nextProfile);
+        // Start a new conversation (the profile persists — no need to
+        // re-enter a name).
+        const greeting = buildGreeting(profile);
         startNewConversation([{ role: 'assistant', content: greeting }]);
         setVoiceState('idle');
         setInterimText('');
@@ -3898,42 +3132,11 @@ Remember: you are holding space for two people to feel heard by each other. Your
         setError(null);
       };
 
-      const handleNewChat = () => {
-        stopVoicePipeline();
-        // Start a new conversation (profile persists, no need to redo quiz)
-        if (profile) {
-          const greeting = buildGreeting(profile);
-          startNewConversation([{ role: 'assistant', content: greeting }]);
-          setVoiceState('idle');
-          setInterimText('');
-          setTextInput('');
-          setError(null);
-          setShowHistory(false);
-        } else {
-          // No profile — go back to quiz
-          setMessages([]);
-          setActiveConvoId(null);
-          saveToStorage(STORAGE_KEYS.activeId, null);
-          setVoiceState('idle');
-          setInterimText('');
-          setTextInput('');
-          setError(null);
-          setStarted(false);
-          setShowHistory(false);
-        }
-      };
-
       // ── A/B Source of Truth variant switching ──
-      // Default = fresh session (clean A/B). The dev-only keep-transcript
-      // override is safe because the prompt is rebuilt every turn anyway.
+      // Always a fresh session (clean A/B) — the two variants must never
+      // share a transcript.
       const handleVariantSwitch = (key) => {
         if (!SOT_VARIANTS[key] || key === sotVariantRef.current) return;
-        if (devKeepTranscript) {
-          sotVariantRef.current = key;
-          setSotVariant(key);
-          saveToStorage(STORAGE_KEYS.sotVariant, key);
-          return;
-        }
         const hasUserTurn = messagesRef.current.some(m => m.role === 'user');
         if (hasUserTurn && !window.confirm('Switch to Version ' + key + '? This starts a fresh conversation.')) return;
         stopVoicePipeline();
@@ -3948,55 +3151,10 @@ Remember: you are holding space for two people to feel heard by each other. Your
         setError(null);
       };
 
-      // ── Transcript export (dev panel) ──
-      const buildTranscriptExport = () => {
-        const v = sotVariantRef.current;
-        const header = [
-          '=== Feel Understood Sandbox transcript ===',
-          'variant: ' + v + ' (' + (SOT_VARIANTS[v]?.name || 'unknown') + ')',
-          'sandbox: ' + SANDBOX_VERSION,
-          'voice stack: ' + VOICE_STACK,
-          'model: ' + CHAT_MODEL,
-          'exported: ' + new Date().toISOString(),
-          '==========================================',
-          '',
-        ].join('\n');
-        const body = messagesRef.current.map(m => {
-          const who = m.role === 'user' ? 'USER' : 'COACH';
-          const text = m.visual ? m.content + '\n[VISUAL]\n' + m.visual : m.content;
-          return who + ': ' + text;
-        }).join('\n\n');
-        return header + body;
-      };
-
-      const copyTranscript = async () => {
-        const text = buildTranscriptExport();
-        let ok = false;
-        try {
-          await navigator.clipboard.writeText(text);
-          ok = true;
-        } catch (e) {
-          // Clipboard API can be unavailable/denied — textarea fallback.
-          try {
-            const ta = document.createElement('textarea');
-            ta.value = text;
-            document.body.appendChild(ta);
-            ta.select();
-            ok = document.execCommand('copy');
-            document.body.removeChild(ta);
-          } catch (e2) {}
-        }
-        if (ok) {
-          setDevCopied(true);
-          setTimeout(() => setDevCopied(false), 2000);
-        }
-      };
-
       const handleStartOver = () => {
         // Full reset means full reset: the gate promises "conversations are
         // stored only on this device", so handing the device to the next
-        // tester must not leave the previous tester's coaching sessions
-        // readable in the history drawer.
+        // tester must not leave the previous tester's sessions behind.
         if (!window.confirm('This clears your profile and all conversations on this device. Continue?')) return;
         stopVoicePipeline();
         setProfile(null);
@@ -4005,149 +3163,25 @@ Remember: you are holding space for two people to feel heard by each other. Your
         setMessages([]);
         setActiveConvoId(null);
         saveToStorage(STORAGE_KEYS.activeId, null);
-        saveToStorage(STORAGE_KEYS.appMode, null);
         saveToStorage(STORAGE_KEYS.conversations, []);
-        setConversations([]);
-        setAppMode(SANDBOX ? 'beta' : null);
-        if (SANDBOX) setGatePassed(false);
+        setGatePassed(false);
         setVoiceState('idle');
         setInterimText('');
         setTextInput('');
         setError(null);
         setStarted(false);
-        setShowHistory(false);
       };
 
-      const handleLoadConversation = (convo) => {
-        stopVoicePipeline();
-        // Restore the mode this conversation was held under — resuming a
-        // facilitator session must not continue with the coach prompt (or
-        // vice versa) just because the user switched modes since.
-        if (convo.mode && profile && (convo.mode !== profile.mode || convo.path !== profile.path)) {
-          const restored = { ...profile, mode: convo.mode, goal: convo.goal ?? null, path: convo.path || profile.path };
-          setProfile(restored);
-          profileRef.current = restored;
-          saveProfile(restored);
-        }
-        setActiveConvoId(convo.id);
-        activeConvoIdRef.current = convo.id;
-        setMessages(convo.messages);
-        saveToStorage(STORAGE_KEYS.activeId, convo.id);
-        setVoiceState('idle');
-        setInterimText('');
-        setTextInput('');
-        setError(null);
-        setShowHistory(false);
-        setStarted(true);
-      };
-
-      const handleDeleteConversation = (e, id) => {
-        e.stopPropagation();
-        // Deletion is permanent (localStorage only) and the button sits
-        // inside the tappable row — confirm so a stray tap can't silently
-        // destroy a conversation.
-        if (!window.confirm('Delete this conversation?')) return;
-        const remaining = deleteConversation(id);
-        setConversations(remaining);
-        if (id === activeConvoId) {
-          if (remaining.length > 0) {
-            handleLoadConversation(remaining[0]);
-          } else {
-            handleNewChat();
-          }
-        }
-      };
-
-      // ── Sandbox dev panel ──
-      // Reuses the hidden '· dev ·' link pattern from the Landing Gate.
-      // Shows the A/B → variant mapping (this is where the blind lifts),
-      // stack/model ids, per-variant prompt sizes (Deep should read ≈30k
-      // characters heavier than Light — the instant splice sanity check),
-      // and the cache readout from the last turn.
-      const renderDevPanel = () => {
-        if (!SANDBOX || !showDevPanel) return null;
-        const p = profileRef.current;
-        let lenA = null, lenB = null;
-        try {
-          lenA = SOT_VARIANTS.A.build(p).length;
-          lenB = SOT_VARIANTS.B.build(p).length;
-        } catch (e) {}
-        const u = lastUsage;
-        const row = (label, value) => React.createElement('p', { key: label },
-          React.createElement('strong', null, label + ': '), value);
-        return React.createElement('div', { className: 'info-screen' },
-          React.createElement('button', {
-            className: 'info-close',
-            onClick: () => setShowDevPanel(false),
-            'aria-label': 'Close dev panel',
-          },
-            React.createElement('svg', { width: 22, height: 22, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' },
-              React.createElement('line', { x1: 18, y1: 6, x2: 6, y2: 18 }),
-              React.createElement('line', { x1: 6, y1: 6, x2: 18, y2: 18 }),
-            )
-          ),
-          React.createElement('div', { className: 'info-inner' },
-            React.createElement('div', { className: 'info-eyebrow' }, 'Dev'),
-            React.createElement('h1', { className: 'info-title' }, 'Sandbox rig'),
-            React.createElement('div', { className: 'info-card dev-card' },
-              row('Sandbox', SANDBOX_VERSION),
-              row('Mapping', 'A → light (live prompt, verbatim) · B → deep (SoT V2 splice)'),
-              row('Active variant', sotVariant + ' → ' + (SOT_VARIANTS[sotVariant]?.name || '?')),
-              row('Voice stack', VOICE_STACK + ' (SpeechRecognition / /api/stt → /api/chat-stream → /api/tts tts-1 shimmer)'),
-              row('Model', CHAT_MODEL),
-              row('Prompt chars', lenA === null ? 'unavailable'
-                : 'A (light) ' + lenA.toLocaleString()
-                  + ' · B (deep) ' + lenB.toLocaleString()
-                  + ' · Δ +' + (lenB - lenA).toLocaleString()
-                  + (p ? '' : ' (no profile yet — base prompt only)')),
-              row('Cache (last turn)', u
-                ? 'creation ' + (u.cache_creation_input_tokens ?? 0)
-                  + ' · read ' + (u.cache_read_input_tokens ?? 0)
-                  + ' · input ' + (u.input_tokens ?? '—')
-                : 'no turns yet — also logged server-side per turn'),
-            ),
-            React.createElement('label', { className: 'dev-keep' },
-              React.createElement('input', {
-                type: 'checkbox',
-                checked: devKeepTranscript,
-                onChange: (e) => setDevKeepTranscript(e.target.checked),
-              }),
-              ' Keep transcript when switching variant (dev only — never the default; the prompt is rebuilt every turn)'
-            ),
-            React.createElement('button', {
-              className: 'quiz-cta',
-              onClick: copyTranscript,
-            }, devCopied ? 'Copied ✓' : 'Copy transcript with header'),
-          ),
-        );
-      };
-
-      // ── Landing Gate (Beta vs Full) ──
-      // Shown only on the very first visit, before any profile or conversation
-      // exists. Once the user picks a version it’s persisted to localStorage so
-      // testers always re-enter into the same experience.
-      // Sandbox: appMode is pinned to 'beta', the gate is tracked by
-      // gatePassed instead, and the hidden dev link opens the dev panel
-      // (there is no route into the full app).
-      const chooseAppMode = (mode) => {
-        saveToStorage(STORAGE_KEYS.appMode, mode);
-        setAppMode(mode);
-      };
-      if (SANDBOX ? (!gatePassed && !profile && !started) : (!appMode && !profile && !started)) {
-        return React.createElement(React.Fragment, null,
-          React.createElement(LandingGate, {
-            onChooseBeta: () => { chooseAppMode('beta'); setGatePassed(true); },
-            onChooseFull: SANDBOX ? () => setShowDevPanel(true) : () => chooseAppMode('full'),
-          }),
-          renderDevPanel(),
-        );
+      // ── Landing Gate ──
+      // Shown only on the very first visit, before any profile or
+      // conversation exists; returning testers skip straight to the chat.
+      if (!gatePassed && !profile && !started) {
+        return React.createElement(LandingGate, { onStart: () => setGatePassed(true) });
       }
 
-      const isBeta = SANDBOX || appMode === 'beta';
-
-      // ── Onboarding Quiz ──
+      // ── Name entry (the only onboarding step) ──
       if (!started) {
-        return React.createElement(ProfileQuiz, { onComplete: handleQuizComplete, beta: isBeta });
+        return React.createElement(NameScreen, { onComplete: handleNameComplete });
       }
 
       const statusLabel = handsFree
@@ -4166,45 +3200,17 @@ Remember: you are holding space for two people to feel heard by each other. Your
             speaking: (realtime.supported && realtimeEnabledRef.current) ? 'Tap to interrupt' : 'Tap to stop',
           }[voiceState];
 
-      const formatTime = (ts) => {
-        const d = new Date(ts);
-        const now = new Date();
-        const diff = now - d;
-        if (diff < 60000) return 'Just now';
-        if (diff < 3600000) return Math.floor(diff / 60000) + 'm ago';
-        if (diff < 86400000) return Math.floor(diff / 3600000) + 'h ago';
-        if (diff < 604800000) return Math.floor(diff / 86400000) + 'd ago';
-        return d.toLocaleDateString();
-      };
-
       // ── Chat UI ──
       return React.createElement('div', { className: 'app-shell' },
         // Top bar
         React.createElement('header', { className: 'app-header' },
           React.createElement('div', { className: 'header-left' },
-            React.createElement('button', {
-              className: 'history-toggle-btn',
-              onClick: () => setShowHistory(!showHistory),
-              'aria-label': 'Menu',
-              title: 'Menu',
-            },
-              React.createElement('svg', { width: 22, height: 22, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' },
-                React.createElement('line', { x1: 3, y1: 6, x2: 21, y2: 6 }),
-                React.createElement('line', { x1: 3, y1: 12, x2: 21, y2: 12 }),
-                React.createElement('line', { x1: 3, y1: 18, x2: 21, y2: 18 }),
-              )
-            ),
             React.createElement('div', { className: 'header-title-wrap' },
               React.createElement('span', { className: 'header-title' }, 'Feel Understood'),
               React.createElement('span', { className: 'header-subtitle' }, 'Your Conversation Coach'),
             ),
           ),
           React.createElement('div', { className: 'header-right' },
-            profile && !isBeta && React.createElement('button', {
-              className: 'basecamp-btn',
-              onClick: () => setShowBasecamp(true),
-              title: 'Basecamp',
-            }, 'Basecamp'),
             React.createElement('button', {
               className: `voice-toggle-btn ${voiceMuted ? 'voice-toggle-muted' : ''}`,
               onClick: toggleVoiceMuted,
@@ -4231,337 +3237,21 @@ Remember: you are holding space for two people to feel heard by each other. Your
           )
         ),
 
-        // Basecamp — home screen with 3 modes and grounding context
-        showBasecamp && React.createElement('div', { className: 'basecamp-screen' },
-          React.createElement('button', {
-            className: 'basecamp-close',
-            onClick: () => setShowBasecamp(false),
-            'aria-label': 'Close basecamp',
-          },
-            React.createElement('svg', { width: 22, height: 22, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' },
-              React.createElement('line', { x1: 18, y1: 6, x2: 6, y2: 18 }),
-              React.createElement('line', { x1: 6, y1: 6, x2: 18, y2: 18 }),
-            )
-          ),
-          React.createElement('div', { className: 'basecamp-inner' },
-            React.createElement('div', { className: 'basecamp-eyebrow' }, 'Basecamp'),
-            React.createElement('h1', { className: 'basecamp-title' },
-              profile?.name ? `Welcome back, ${profile.name}.` : 'Welcome back.'
-            ),
-            React.createElement('p', { className: 'basecamp-lede' },
-              'Take a breath. This is your home for practising better conversations — a space to slow down, notice, and choose how you want to show up.'
-            ),
-            React.createElement('div', { className: 'basecamp-pillars' },
-              React.createElement('div', { className: 'basecamp-pillar' },
-                React.createElement('span', { className: 'basecamp-pillar-dot' }),
-                React.createElement('span', null, React.createElement('strong', null, 'Explainer'), ' — be understood'),
-              ),
-              React.createElement('div', { className: 'basecamp-pillar' },
-                React.createElement('span', { className: 'basecamp-pillar-dot basecamp-pillar-dot-green' }),
-                React.createElement('span', null, React.createElement('strong', null, 'Understander'), ' — truly hear'),
-              ),
-              React.createElement('div', { className: 'basecamp-pillar' },
-                React.createElement('span', { className: 'basecamp-pillar-dot' }),
-                React.createElement('span', null, React.createElement('strong', null, 'Conversation Manager'), ' — hold the space'),
-              ),
-            ),
-            React.createElement('p', { className: 'basecamp-prompt' }, 'Where would you like to go today?'),
-            React.createElement('div', { className: 'basecamp-cards' },
-              NEXT_STEPS.map(p => React.createElement('button', {
-                key: p.id,
-                className: `next-step-card next-step-card-${p.id} ${profile?.path === p.id ? 'next-step-card-active' : ''}`,
-                onClick: () => handleSwitchMode(p.id),
-              },
-                React.createElement('span', { className: 'next-step-tag' }, p.tag),
-                React.createElement('h3', { className: 'next-step-title' }, p.title),
-                React.createElement('p', { className: 'next-step-desc' }, p.desc),
-                React.createElement('span', { className: 'next-step-arrow', 'aria-hidden': true }, '\u2192'),
-              ))
-            ),
-            React.createElement('p', { className: 'basecamp-quote' },
-              '\u201CEven small improvements in the way we talk can change the shape of a relationship.\u201D'
-            ),
+        // Helpline banner with the A/B pill — neutral labels only; the
+        // variant mapping stays in code so the tester A/B stays blind.
+        React.createElement('div', { className: 'mode-hint mode-hint-helpline' },
+          React.createElement('strong', null, 'Helpline \u00B7 '),
+          'Unpacking a conversation that matters.',
+          React.createElement('span', { className: 'sot-pill' },
+            React.createElement('span', { className: 'sot-pill-label' }, 'Coach:'),
+            ['A', 'B'].map(k => React.createElement('button', {
+              key: k,
+              className: 'sot-pill-btn' + (sotVariant === k ? ' sot-pill-active' : ''),
+              onClick: () => handleVariantSwitch(k),
+              'aria-pressed': sotVariant === k,
+            }, k)),
           ),
         ),
-
-        // Navigation drawer (modes, conversations, about/insights, theme toggle)
-        showHistory && React.createElement('div', { className: 'history-overlay', onClick: () => setShowHistory(false) }),
-        React.createElement('div', { className: `history-drawer ${showHistory ? 'history-open' : ''}` },
-          React.createElement('div', { className: 'history-header' },
-            React.createElement('h3', null, 'Menu'),
-            React.createElement('button', {
-              className: 'history-close-btn',
-              onClick: () => setShowHistory(false),
-              'aria-label': 'Close menu',
-            }, '\u00D7'),
-          ),
-          React.createElement('div', { className: 'drawer-scroll' },
-          // Modes section — switch between the 3 paths (hidden in beta)
-          profile && !isBeta && React.createElement('div', { className: 'drawer-section', key: 'modes' },
-            React.createElement('div', { className: 'drawer-section-label' }, 'Mode'),
-            NEXT_STEPS.map(p => React.createElement('button', {
-              key: p.id,
-              className: `drawer-mode-item drawer-mode-${p.id} ${profile.path === p.id ? 'drawer-mode-item-active' : ''}`,
-              onClick: () => { handleSwitchMode(p.id); setShowHistory(false); },
-            },
-              React.createElement('span', { className: 'drawer-mode-dot' }),
-              React.createElement('span', { className: 'drawer-mode-text' },
-                React.createElement('span', { className: 'drawer-mode-label' }, p.label),
-                React.createElement('span', { className: 'drawer-mode-sub' }, p.tag),
-              ),
-              profile.path === p.id && React.createElement('span', { className: 'drawer-mode-check', 'aria-hidden': true }, 'Active'),
-            )),
-          ),
-
-          // Conversations section
-          React.createElement('div', { className: 'drawer-section', key: 'convos' },
-            React.createElement('div', { className: 'drawer-section-label' }, 'Conversations'),
-            React.createElement('div', { className: 'history-list' },
-            conversations.length === 0
-              ? React.createElement('p', { className: 'history-empty' }, 'No conversations yet')
-              : conversations.map(c =>
-                  React.createElement('div', {
-                    key: c.id,
-                    className: `history-item ${c.id === activeConvoId ? 'history-item-active' : ''}`,
-                    onClick: () => handleLoadConversation(c),
-                  },
-                    React.createElement('div', { className: 'history-item-content' },
-                      React.createElement('span', { className: 'history-item-title' }, c.title),
-                      React.createElement('span', { className: 'history-item-time' }, formatTime(c.updatedAt)),
-                    ),
-                    React.createElement('button', {
-                      className: 'history-item-delete',
-                      onClick: (e) => handleDeleteConversation(e, c.id),
-                      'aria-label': 'Delete conversation',
-                      title: 'Delete',
-                    }, '\u00D7'),
-                  )
-                )
-            ),
-          ),
-
-          // More section — About, Insights (hidden in the sandbox)
-          !SANDBOX && React.createElement('div', { className: 'drawer-section', key: 'more' },
-            React.createElement('div', { className: 'drawer-section-label' }, 'More'),
-            React.createElement('button', {
-              className: 'drawer-link',
-              onClick: () => { setShowAbout(true); setShowHistory(false); },
-            },
-              React.createElement('svg', { width: 18, height: 18, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' },
-                React.createElement('circle', { cx: 12, cy: 12, r: 10 }),
-                React.createElement('line', { x1: 12, y1: 8, x2: 12, y2: 8 }),
-                React.createElement('polyline', { points: '11 12 12 12 12 16 13 16' }),
-              ),
-              React.createElement('span', null, 'About'),
-            ),
-            React.createElement('button', {
-              className: 'drawer-link',
-              onClick: () => { setShowInsights(true); setShowHistory(false); },
-            },
-              React.createElement('svg', { width: 18, height: 18, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' },
-                React.createElement('path', { d: 'M3 3v18h18' }),
-                React.createElement('path', { d: 'M7 15l3-4 3 2 4-6' }),
-              ),
-              React.createElement('span', null, 'Insights'),
-            ),
-          ),
-          ), // end drawer-scroll
-
-          React.createElement('div', { className: 'history-footer' },
-            React.createElement('button', {
-              className: 'drawer-theme-toggle',
-              onClick: toggleTheme,
-              'aria-label': theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode',
-            },
-              theme === 'dark'
-                ? React.createElement('svg', { width: 18, height: 18, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' },
-                    React.createElement('circle', { cx: 12, cy: 12, r: 4 }),
-                    React.createElement('path', { d: 'M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41' }),
-                  )
-                : React.createElement('svg', { width: 18, height: 18, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' },
-                    React.createElement('path', { d: 'M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z' }),
-                  ),
-              React.createElement('span', null, theme === 'dark' ? 'Light mode' : 'Dark mode'),
-            ),
-            React.createElement('button', {
-              className: 'history-start-over-btn',
-              onClick: handleStartOver,
-            }, 'Reset Profile & Start Over'),
-            SANDBOX
-              // No route into the full app from the sandbox — the hidden
-              // link opens the dev panel instead.
-              ? React.createElement('button', {
-                  className: 'drawer-dev-toggle',
-                  onClick: () => { setShowDevPanel(true); setShowHistory(false); },
-                  title: 'Developer panel',
-                }, '· dev ·')
-              : React.createElement('button', {
-                  className: 'drawer-dev-toggle',
-                  onClick: () => {
-                    const next = isBeta ? 'full' : 'beta';
-                    saveToStorage(STORAGE_KEYS.appMode, next);
-                    setAppMode(next);
-                    setShowHistory(false);
-                  },
-                  title: isBeta ? 'Switch to full version' : 'Switch to beta',
-                }, isBeta ? '· dev ·' : '· beta ·'),
-          ),
-        ),
-
-        // About screen
-        showAbout && React.createElement('div', { className: 'info-screen' },
-          React.createElement('button', {
-            className: 'info-close',
-            onClick: () => setShowAbout(false),
-            'aria-label': 'Close about',
-          },
-            React.createElement('svg', { width: 22, height: 22, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' },
-              React.createElement('line', { x1: 18, y1: 6, x2: 6, y2: 18 }),
-              React.createElement('line', { x1: 6, y1: 6, x2: 18, y2: 18 }),
-            )
-          ),
-          React.createElement('div', { className: 'info-inner' },
-            React.createElement('div', { className: 'info-eyebrow' }, 'About'),
-            React.createElement('h1', { className: 'info-title' }, 'About Feel Understood'),
-            React.createElement('div', { className: 'info-prose' },
-              React.createElement('p', null,
-                'The aim of our not-for-profit campaign is simple. We want to help more people enjoy the benefits of feeling understood — an essential ingredient of a fulfilling life that often seems overlooked and in short supply.'
-              ),
-              React.createElement('p', null,
-                'On a grand scale, everyone agrees that the world would be a better place if there was more understanding in the air and less misunderstanding, more connection and less disconnection. This wouldn’t solve every problem, of course, but it would create more opportunities for cooperation and collaboration, and a greater appreciation of our similarities rather than our differences.'
-              ),
-              React.createElement('p', null,
-                'On a day-to-day level, we can individually make our lives richer in understanding by changing the way we approach conversations, particularly those we consider potentially difficult or challenging.'
-              ),
-              React.createElement('p', null,
-                'Put simply, the approach we’re promoting is an informal, everyday version of dialogue — true two-way communication that seeks clarity and shared understanding as its foundation and first principle.'
-              ),
-              React.createElement('p', null,
-                'Dialogic conversations like this are far more likely to happen if a certain set of skills are being used wisely in service of the interaction. There are, in fact, two sets of skills involved, because in a dialogic conversation you have two different but complementary aims. One aim is to feel understood by the other person. The other aim is to have the other person feel understood by you. Two different tasks, each requiring a specific set of skills to perform consistently well.'
-              ),
-              React.createElement('p', null,
-                'The Conversation Coach is a chatbot deeply trained in the skills and wisdom of dialogic conversation. As well as modelling these skills in its conversations with you, the Conversation Coach is also an endlessly patient teacher and a 24/7 source of advice on how to have better conversations. Imagine being able to rehearse a difficult conversation anytime, just before it happens.'
-              ),
-              React.createElement('p', null,
-                'We’ve trained the Conversation Coach with a unique collection of resources developed over 30 years of research and development in the field of interpersonal communication. Many of the core ideas are drawn from the co-authored works of Professor Gerard Egan and Andrew Bailey, both published and unpublished. Further back, we must also acknowledge Carl Rogers, the pioneer of counselling, who demonstrated to the world the remarkable therapeutic power of feeling understood.'
-              ),
-              React.createElement('p', null,
-                'The Conversation Coach’s training resources also include landmark papers published in leading science journals. In short, there is nothing gimmicky about our approach. It’s based on proven principles and practices, many from the world of counselling and all backed by science.'
-              ),
-            ),
-            React.createElement('hr', { className: 'info-divider' }),
-            React.createElement('h2', { className: 'info-section-title' }, 'Who’s Behind the Campaign?'),
-            React.createElement('div', { className: 'info-card' },
-              React.createElement('h3', null, 'Andrew Bailey'),
-              React.createElement('p', null,
-                'Andrew’s early career was spent as a journalist, mostly with Rolling Stone, and in the music business as an A&R manager. He then spent the rest of his career as a copywriter and creative director in the media industry. His first collaboration with Professor Gerard Egan was a series of books called ',
-                React.createElement('em', null, 'TalkWorks: How To Get More Out Of Life Through Better Conversations'),
-                '. Over a million copies were distributed nationally as part of the Millennium celebrations. The ideas in the books later became the basis of DVDs, theatre productions, and online courses for use in schools, teacher training, and businesses. A more recent collaboration with Gerry was ',
-                React.createElement('em', null, 'The Helping Conversation'),
-                ', published in 2022, a reader-friendly introduction to the skills of everyday counselling.'
-              ),
-            ),
-            React.createElement('div', { className: 'info-card' },
-              React.createElement('h3', null, 'Professor Gerard Egan'),
-              React.createElement('p', null,
-                'Professor Gerard Egan, born in 1930, is an influential American psychologist whose career as a counsellor, author, and educator has spanned more than 60 years. His major work, ',
-                React.createElement('em', null, 'The Skilled Helper'),
-                ', was first published in 1975 and became a classic text in counselling training programmes. The book remains in print today, 50 years later — a remarkable achievement. Updated periodically with the latest studies, it is now in its 11th edition. Widely translated, Gerry’s books remain required reading for trainee counsellors and therapists throughout the world.'
-              ),
-            ),
-            React.createElement('div', { className: 'info-card' },
-              React.createElement('h3', null, 'Adam (Eazy) Bailey'),
-              React.createElement('p', null,
-                'Adam (Eazy) Bailey leads technology and digital innovation while advising on strategy. His career spans media, live events, digital commerce, and strategic consulting, bringing a commercially minded and entrepreneurial approach to organisations and projects. Eazy began his career at MTV, where he became Head of European Events, before moving into independent consulting across events, operations, and commercial strategy. He now specialises in technology-led and online ventures, combining expertise in digital infrastructure, e-commerce, product development, and strategic consulting to help organisations strengthen operations, sharpen strategic direction, and build effective digital platforms.'
-              ),
-            ),
-            React.createElement('div', { className: 'info-card' },
-              React.createElement('h3', null, 'Adrian Hosford'),
-              React.createElement('p', null,
-                'Adrian became fascinated with the effectiveness and quality of human communication while developing the “It’s Good to Talk” campaign. He created the Communication Forum to research the subject in greater depth and commissioned ',
-                React.createElement('em', null, 'TalkWorks'),
-                ' to help make the skills and insights of better communication widely available. His work continues to focus on improving the quality of human communication so that more people can feel understood.'
-              ),
-            ),
-          ),
-        ),
-
-        // Insights screen
-        showInsights && React.createElement('div', { className: 'info-screen' },
-          React.createElement('button', {
-            className: 'info-close',
-            onClick: () => setShowInsights(false),
-            'aria-label': 'Close insights',
-          },
-            React.createElement('svg', { width: 22, height: 22, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' },
-              React.createElement('line', { x1: 18, y1: 6, x2: 6, y2: 18 }),
-              React.createElement('line', { x1: 6, y1: 6, x2: 18, y2: 18 }),
-            )
-          ),
-          React.createElement('div', { className: 'info-inner' },
-            React.createElement('div', { className: 'info-eyebrow' }, 'Insights'),
-            React.createElement('h1', { className: 'info-title' }, 'Your practice, at a glance'),
-            React.createElement('p', { className: 'info-lede' },
-              'A quiet window on the work you’ve been doing here.'
-            ),
-            React.createElement('div', { className: 'info-stats' },
-              React.createElement('div', { className: 'info-stat' },
-                React.createElement('span', { className: 'info-stat-num' }, conversations.length),
-                React.createElement('span', { className: 'info-stat-label' }, conversations.length === 1 ? 'conversation' : 'conversations'),
-              ),
-              React.createElement('div', { className: 'info-stat' },
-                React.createElement('span', { className: 'info-stat-num' },
-                  conversations.reduce((sum, c) => sum + (c.messages?.length || 0), 0)
-                ),
-                React.createElement('span', { className: 'info-stat-label' }, 'messages exchanged'),
-              ),
-              React.createElement('div', { className: 'info-stat' },
-                React.createElement('span', { className: 'info-stat-num-sm' },
-                  profile ? (NEXT_STEPS.find(p => p.id === profile.path)?.label || '—') : '—'
-                ),
-                React.createElement('span', { className: 'info-stat-label' }, 'current mode'),
-              ),
-            ),
-            React.createElement('div', { className: 'info-card' },
-              React.createElement('h3', null, 'Coming soon'),
-              React.createElement('p', null,
-                'Patterns across your conversations — recurring themes, the skills you lean on, and where growth is showing up. For now, the best insight is the one you notice in the moment.'
-              ),
-            ),
-          ),
-        ),
-
-        // Mode indicator banner — shows which mode you're currently in
-        profile && (() => {
-          const hints = {
-            lessons: { label: 'Coach Mode', text: 'Learning the skills of dialogue.' },
-            helpline: { label: 'Helpline', text: 'Unpacking a conversation that matters.' },
-            facilitator: { label: 'Facilitator Mode', text: 'Each of you, say your name before you speak — e.g. "Sarah: I felt..."' },
-          };
-          // Fall back to mode if path is missing or unknown (e.g. profiles saved before paths existed)
-          const pathKey = hints[profile.path]
-            ? profile.path
-            : (profile.mode === 'facilitator' ? 'facilitator' : 'lessons');
-          const h = hints[pathKey];
-          return React.createElement('div', { className: `mode-hint mode-hint-${pathKey}` },
-            React.createElement('strong', null, h.label + ' · '),
-            h.text,
-            // A/B pill — neutral labels only; the mapping stays in code
-            // and the dev panel so the client test stays blind.
-            SANDBOX && React.createElement('span', { className: 'sot-pill' },
-              React.createElement('span', { className: 'sot-pill-label' }, 'Coach:'),
-              ['A', 'B'].map(k => React.createElement('button', {
-                key: k,
-                className: 'sot-pill-btn' + (sotVariant === k ? ' sot-pill-active' : ''),
-                onClick: () => handleVariantSwitch(k),
-                'aria-pressed': sotVariant === k,
-              }, k)),
-            ),
-          );
-        })(),
-
-        // Dev panel (sandbox — hidden '· dev ·' links open it)
-        renderDevPanel(),
 
         // Messages
         React.createElement('main', { className: 'chat-area' },
@@ -4625,11 +3315,10 @@ Remember: you are holding space for two people to feel heard by each other. Your
           // Text input
           React.createElement('form', { className: 'text-form', onSubmit: handleTextSubmit },
             React.createElement('input', {
-              ref: inputRef,
               type: 'text',
               value: textInput,
               onChange: (e) => setTextInput(e.target.value),
-              placeholder: profile?.mode === 'facilitator' ? 'Sarah: ... or Mark: ...' : 'Or type here...',
+              placeholder: 'Or type here...',
               className: 'text-input',
             }),
             React.createElement('button', {
@@ -4648,8 +3337,15 @@ Remember: you are holding space for two people to feel heard by each other. Your
             'Voice not supported in this browser. Type below instead.'
           ),
 
-          // Version label
-          React.createElement('p', { className: 'version-label' }, SANDBOX_VERSION)
+          // Version label + full device reset (hand-off between testers)
+          React.createElement('p', { className: 'version-label' },
+            SANDBOX_VERSION,
+            ' · ',
+            React.createElement('button', {
+              className: 'start-over-link',
+              onClick: handleStartOver,
+            }, 'start over'),
+          )
         )
       );
     };

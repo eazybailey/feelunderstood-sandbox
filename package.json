@@ -1,12 +1,6 @@
 {
   "name": "feelunderstood-sandbox",
   "version": "0.1.0",
-  "type": "module",
-  "scripts": {
-    "generate-icons": "node scripts/generate-icons.mjs",
-    "bump": "node scripts/bump-version.mjs"
-  },
-  "devDependencies": {
-    "sharp": "^0.34.5"
-  }
+  "private": true,
+  "type": "module"
 }

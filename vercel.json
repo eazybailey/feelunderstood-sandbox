@@ -1,15 +1,6 @@
 {
   "cleanUrls": true,
-  "headers": [
-    {
-      "source": "/sw.js",
-      "headers": [
-        { "key": "Cache-Control", "value": "no-cache" },
-        { "key": "Service-Worker-Allowed", "value": "/" }
-      ]
-    }
-  ],
   "rewrites": [
-    { "source": "/((?!api|images|vendor|sw\\.js|manifest\\.json|styles\\.css).*)", "destination": "/index.html" }
+    { "source": "/((?!api|images|vendor|styles\\.css).*)", "destination": "/index.html" }
   ]
 }

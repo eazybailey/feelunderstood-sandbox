@@ -1,13 +1,14 @@
-> **SANDBOX FORK — read `SANDBOX_NOTES.md` first.** This repo is the
-> Sandbox v0.1 A/B test rig forked from `eazybailey/chatbot-demo` (see
-> `Feel_Understood_Sandbox_Build_Brief_V1.1.md`). The notes below describe
-> the live app; in this fork the service worker is disabled, the version
-> label is `sandbox-0.1`, only the name → Helpline path is exposed, and the
-> coach prompt has an A/B Source of Truth toggle with prompt caching.
+# Feel Understood — Sandbox
 
-# The Conversation Coach
+> **Read `SANDBOX_NOTES.md` first.** This repo is the Sandbox v0.1 A/B test
+> rig (see `Feel_Understood_Sandbox_Build_Brief_V1.1.md`), stripped to the
+> bare product: Landing Gate → first name → Communication Helpline, with a
+> blind A/B toggle between two coach system prompts (`light` vs `deep`).
+> Nothing here is production; the live app lives in `eazybailey/chatbot-demo`.
 
-A voice-first Progressive Web App for practicing better conversations through AI coaching, built on the "Dialogue System" framework by Gerard Egan and Andrew Bailey.
+A voice-first web app for practicing better conversations through AI coaching,
+built on the "Dialogue System" framework by Gerard Egan and Andrew Bailey —
+reduced to the single Helpline path needed to compare Source-of-Truth prompts.
 
 ## Tech Stack
 
@@ -15,247 +16,136 @@ A voice-first Progressive Web App for practicing better conversations through AI
 |-------|-----------|
 | Frontend | React 18.3.1 (vendored UMD builds in `/vendor` — no CDN, no build step; app code is plain `React.createElement`, no JSX/Babel) |
 | Backend | Vercel Functions — Edge Runtime (`chat-stream`, `tts`, `stt`, `realtime-session`) |
-| AI | Anthropic Claude API (claude-sonnet-4-6) |
-| TTS | OpenAI TTS API (`tts-1` model, `shimmer` voice) — streamed as raw PCM for gapless playback, MP3 fallback |
-| STT | **Primary**: OpenAI Realtime API over WebRTC (`gpt-4o-mini-transcribe`, server VAD, hands-free). Fallbacks: native Web Speech API (`SpeechRecognition`), then MediaRecorder → `/api/stt` (Whisper) |
+| AI | Anthropic Claude API (claude-sonnet-4-6), prompt caching on the system block |
+| TTS | OpenAI TTS API (`tts-1`, `shimmer` voice) — streamed as raw PCM for gapless playback, MP3 fallback |
+| STT | **Primary**: OpenAI Realtime API over WebRTC (`gpt-4o-mini-transcribe`, server VAD, hands-free). Fallbacks: native Web Speech API, then MediaRecorder → `/api/stt` (`gpt-4o-mini-transcribe`; Groq `whisper-large-v3-turbo` when only `GROQ_API_KEY` is set) |
 | Hosting | Vercel |
-| Styling | Vanilla CSS, Google Fonts (Inter, Patrick Hand) |
-| PWA | Service Worker, Web App Manifest |
+| Styling | Vanilla CSS (light theme only) |
 
 ## Project Structure
 
 ```
-chatbot-demo/
+feelunderstood-sandbox/
 ├── api/                       # Vercel serverless endpoints (all Edge Runtime)
-│   ├── chat-stream.js        # Streaming Claude API (primary)
-│   ├── realtime-session.js   # Mints ephemeral OpenAI Realtime client secrets for hands-free STT
-│   ├── tts.js                # OpenAI TTS endpoint — PCM streaming or MP3
-│   └── stt.js                # Speech-to-text endpoint — OpenAI Whisper, Groq fallback
-├── vendor/                    # Vendored, pinned React 18.3.1 UMD builds (no CDN dependency)
-│   ├── react.production.min.js
-│   └── react-dom.production.min.js
-├── images/                    # Icons, logos, doodle-style SVGs
-│   ├── favicon.svg
-│   ├── logo.svg
-│   ├── icon-app.svg          # Master SVG for PWA icons
-│   ├── icon-192.png / icon-512.png  # Generated PWA icons
-│   ├── apple-touch-icon.png
-│   ├── icon-avatar.svg       # Chat assistant avatar
-│   ├── icon-learn.svg        # Feature icon (onboarding)
-│   ├── icon-coach.svg        # Feature icon (onboarding)
-│   └── icon-practice.svg     # Feature icon (onboarding)
-├── scripts/
-│   ├── generate-icons.mjs    # Sharp-based icon generation
-│   └── bump-version.mjs      # Single-source-of-truth version bumper (see Versioning)
-├── index.html                # Entire app — single-page React PWA
-├── styles.css                # Global styles (dark theme, animations)
-├── sw.js                     # Service Worker (cache-first assets, network-first API)
-├── manifest.json             # PWA manifest
-├── vercel.json               # Vercel deployment config
-├── plan.md                   # Original implementation plan (historical — see its status note)
-└── package.json              # Dev dep: sharp for icon gen; "version" is the release source of truth
+│   ├── chat-stream.js        # Streaming Claude API; relays array-form system
+│   │                         #   prompt unchanged; logs cache usage per turn
+│   ├── realtime-session.js   # Mints ephemeral OpenAI Realtime client secrets
+│   ├── tts.js                # OpenAI TTS — PCM streaming or MP3
+│   └── stt.js                # Audio transcription (OpenAI; Groq fallback)
+├── vendor/                    # Vendored, pinned React 18.3.1 UMD builds
+├── images/                    # favicon-64.png, icon-avatar.svg — nothing else
+├── docs/
+│   └── SoT_V2.md             # Source text of the Deep variant's SoT block
+├── index.html                # Entire app — single-page React
+├── styles.css                # Global styles (light theme)
+├── vercel.json               # Clean URLs + SPA rewrites
+├── SANDBOX_NOTES.md          # What this rig is and how the A/B works
+└── Feel_Understood_Sandbox_Build_Brief_V1.1.md   # Original build brief
 ```
 
-## Architecture
+There is no service worker, no PWA manifest, no build step, and no npm
+dependencies. `package.json` exists only to name the project.
 
-### Voice Pipeline (Hands-Free Realtime — primary)
-
-```
-User taps mic ONCE → continuous hands-free session begins
-  → Browser opens a WebRTC session directly to OpenAI's Realtime API
-    (ephemeral client secret minted by POST /api/realtime-session)
-  → Mic streams continuously; transcript deltas render as interim text
-  → Server-side VAD ends the turn after ~1.2s of silence (no tap needed)
-  → POST /api/chat-stream (SSE stream to Claude, sent unbuffered)
-  → Sentence buffer fires TTS at natural breaks (first chunk ~28 chars
-    so audio starts ASAP; whole sentences after, for natural prosody)
-  → Each chunk → POST /api/tts with format:'pcm' — raw 24kHz PCM is
-    spliced onto the AudioContext timeline as bytes arrive, so speech
-    starts on the first network chunk and chunks join gaplessly
-  → Mic stays open while the assistant speaks (echo cancellation):
-    the user can BARGE IN — speech_started cancels playback + the stream
-  → After the reply, the session drops straight back to LISTENING
-```
-
-**Fallback (tap-to-talk)** — used when WebRTC/realtime setup fails (and automatically for the rest of the visit after one failure) or isn't supported: native `SpeechRecognition`, or MediaRecorder → `/api/stt` (Whisper) on iOS third-party browsers; ~2.2s client-side silence debounce; buffered MP3 TTS when no AudioContext is running.
-
-### Voice State Machine
+## App Flow
 
 ```
-Hands-free:  IDLE → (tap mic) → LISTENING ⇄ PROCESSING ⇄ SPEAKING
-             (loops without taps; barge-in returns to LISTENING;
-              tap during LISTENING ends the session → IDLE)
-Tap-to-talk: IDLE → (tap mic) → LISTENING → PROCESSING → SPEAKING → IDLE
+Landing Gate ("Sandbox — testing two versions of the coach") → Start
+  → Name screen (first name only)
+  → Helpline chat (greeting spoken via gapless PCM; mic off until first tap)
 ```
 
-Users interrupt during SPEAKING by just talking (hands-free) or tapping the mic (both paths). A tap during SPEAKING flows straight into LISTENING when the realtime path is available (no second tap needed). A new user turn always hard-cancels any still-playing TTS (`cancelSpeak()` at the top of `sendToClaude`) so a superseded reply can never keep talking underneath the new one, and `voiceStateRef` is synced synchronously at every transition the barge-in handler reads (the `useEffect` mirror lags a render).
+Returning visitors (saved profile/conversation in localStorage) skip the gate
+straight into the chat. The footer `start over` link wipes profile +
+conversations for hand-off between testers.
 
-**Voice replies toggle**: a header button (persisted as `fu_voice_muted`) turns TTS off entirely — replies stream as text only, the greeting renders silently, and muting mid-reply cancels playback immediately. STT/mic is unaffected.
+## The A/B Source of Truth toggle
 
-### API Endpoints
+- `SOT_VARIANTS` in `index.html`: `A → light`, `B → deep` — **blind mapping,
+  never shown to testers**, who only see the `Coach: A | B` pill in the
+  Helpline banner.
+- `light` = `buildCoachSystemPromptLight` — emits byte-identical output to the
+  live app's `buildCoachSystemPrompt` for the name-only Helpline path.
+- `deep` = `buildCoachSystemPromptDeep` — runs Light, then replaces the span
+  between `THE DIALOGUE SYSTEM — YOUR SOURCE OF TRUTH:` and
+  `HOW YOU INTERACT:` with `SOT_V2_PART_A` + `SOT_V2_PART_B` (embedded
+  verbatim from `docs/SoT_V2.md`). Everything outside the spliced span is
+  byte-identical between variants by construction — **the test isolates the
+  Source of Truth block and nothing else. Preserve this invariant in any
+  change to the prompt code.**
+- Switching variants always starts a fresh conversation (confirm shown if the
+  chat has user turns). Choice persists in `localStorage`; `?v=a` / `?v=b`
+  forces and persists it (send two links, attribute tests afterwards).
+- **Prompt caching is load-bearing**: the client sends `system` as
+  `[{ type: 'text', text, cache_control: { type: 'ephemeral' } }]` so the
+  ~47k-char Deep prompt doesn't add a first-token delay Light never pays.
+  `api/chat-stream.js` relays it unchanged and logs
+  `cache_creation_input_tokens` / `cache_read_input_tokens` per turn — turn 1
+  creation, turn 2+ reads > 0 is the proof it works.
 
-| Endpoint | Runtime | Purpose |
-|----------|---------|---------|
-| `POST /api/chat-stream` | Edge | Primary. Streams Claude responses as simplified SSE (`data: { text }`, then `data: [DONE]`). Sent unbuffered (`X-Accel-Buffering: no`, `no-transform`) so deltas arrive as produced. Clamps client-supplied `max_tokens` to 1000 |
-| `POST /api/realtime-session` | Edge | Mints a short-lived (10 min) OpenAI Realtime client secret for a hands-free transcription session (server VAD, 1.2s end-of-turn). The browser then talks WebRTC directly to OpenAI |
-| `POST /api/tts` | Edge | Converts text → audio via OpenAI TTS: raw PCM stream (`format: 'pcm'`, primary) or MP3 (default). Aborts a slow upstream after 8s and returns a clean `504` so the client can retry |
-| `POST /api/stt` | Edge | Transcribes uploaded audio (tap-to-talk fallback path). Prefers OpenAI `gpt-4o-mini-transcribe`; falls back to Groq `whisper-large-v3-turbo` if only `GROQ_API_KEY` is set |
+## Voice Pipeline (unchanged from the live app — v0.2 control condition)
 
-Endpoints are same-origin only — the app calls them with relative URLs, so no CORS headers are sent (a wildcard would offer the API keys' quota to any website). The legacy non-streaming `api/chat.js` was removed.
+```
+User taps mic ONCE → continuous hands-free session
+  → WebRTC direct to OpenAI Realtime (ephemeral secret from /api/realtime-session)
+  → server VAD ends the turn after ~1.2s silence
+  → POST /api/chat-stream (SSE, unbuffered)
+  → sentence buffer fires TTS at natural breaks (first chunk ~28 chars)
+  → POST /api/tts format:'pcm' — 24kHz PCM spliced gaplessly onto the
+    AudioContext timeline; barge-in cancels playback + stream
+  → back to LISTENING
+```
 
-### Request Formats
-
-**chat-stream**: JSON `{ messages: [{role, content}], system: string, max_tokens: number }`
-**realtime-session**: empty POST → JSON `{ value: 'ek_...', expires_at }`
-**tts**: JSON `{ input: string, voice: string, format?: 'pcm' }` → `audio/pcm; rate=24000` stream (or `audio/mpeg` by default)
-**stt**: `multipart/form-data` with an `audio` file → JSON `{ text, provider }`
-
-## Frontend Architecture
-
-Single-page React app rendered entirely in `index.html` (no build tooling).
-
-### Key Components
-
-- **`App`** — Root. Manages conversation state, voice state machine, streaming pipeline
-- **Feel Understood onboarding** — A short questionnaire (`FEEL_UNDERSTOOD_SCREENS`) builds a profile, then offers three next-step paths (see Coaching Modes). **Beta mode skips the questionnaire**: "Try the Beta" → name input → straight into the Helpline (the system prompt gets a slim no-questionnaire profile). The greeting is spoken via the gapless PCM path; the mic stays off until the user's first "Tap to talk", which opens the hands-free session
-- **`MessageBubble`** — Chat bubbles (user = yellow right-aligned, assistant = gray left-aligned). Assistant bubbles can carry a `visual` field, rendered by **`VisualAid`** as a card (light markdown subset: bullets, numbered lists, **bold**)
-- **`TypingIndicator`** — Animated dots during processing
-- **`WaveVisualizer`** — Animated bars during listening; reacts to live mic level on the Whisper path
-
-### Custom Hooks
-
-- **`useRealtimeSTT`** — Primary. Hands-free continuous STT via OpenAI Realtime over WebRTC: live transcript deltas, server-VAD turn detection, `speech_started` barge-in events, `getLevel` for the visualizer. Returns `{ supported, startSession, endSession, isActive, getLevel }`
-- **`useSpeechRecognition`** — Tap-to-talk fallback. Wraps native `SpeechRecognition`; manages its own ~2.2s silence debounce. Returns `{ start, stop, abort, supported }`
-- **`useMediaRecorderSTT`** — Tap-to-talk fallback for browsers without usable `SpeechRecognition` (iOS Chrome/Firefox/Edge). Records via `MediaRecorder`, does its own RMS-based silence detection, posts audio to `/api/stt`. Same interface plus `getLevel` for the visualizer
-- **`useSpeechSynthesis`** — Manages the TTS pipeline. Returns `{ speak, speakStreaming, cancel, getLastError }`. `speakStreaming` streams raw PCM gaplessly onto the AudioContext timeline (buffered MP3 fallback when no context). `getLastError` surfaces real TTS failures as a banner instead of masking them with a robotic browser voice
-
-### State (React useState/useRef, no external library)
-
-- `started` — boolean, onboarding → chat transition
-- `profile` — the Feel Understood profile + selected `mode`/`goal`/`path`
-- `messages` — array of `{ role, content }`, full conversation history
-- `voiceState` — `'idle' | 'listening' | 'processing' | 'speaking'`
-- `interimText` / `transcribing` — real-time transcription preview / Whisper-path "transcribing" state
-- `textInput` — fallback text input value
-- `voiceMuted` — voice-replies-off toggle (persisted; TTS skipped, text still streams)
-- `error` — error message (voice failures persist ~10s; others auto-clear faster)
-
-Conversations are persisted to localStorage only once they contain a user message — greeting-only chats (every New Chat / mode switch) are not saved, so the history list stays clean.
-
-## Coaching Framework
-
-The system prompt implements the **Dialogue System** by Gerard Egan & Andrew Bailey:
-
-- **4 Characteristics** of effective dialogue
-- **3 Roles** the coach can play
-- **6 Skill Sets** for communication
-- Frameworks: SAME, MRI, PRE, CRITIC
-
-### Coaching Modes
-
-After the Feel Understood questionnaire, the user picks one of three paths, which map onto a system-prompt **mode** the chat AI uses to tailor its opening turn:
-
-1. **Lessons** (`mode: coach`, goal `learn`) — short teaching sessions on communication skills
-2. **Helpline** (`mode: coach`, goal `helpline`) — talk through a specific conversation or an aspect of yourself you want seen; can role-play approaches
-3. **Facilitator** (`mode: facilitator`) — the AI acts as a neutral third party in a conversation between the user and another person, making sure both are heard
-
-System prompts are built by `buildCoachSystemPrompt` and `buildFacilitatorSystemPrompt`. Responses are optimized for voice: concise (2–4 sentences), warm, no markdown/bullets.
+Fallbacks: native `SpeechRecognition` tap-to-talk, then MediaRecorder →
+`/api/stt`. Self-healing hands-free session (reconnect budget, visibility
+rebuild, mic-track death detection, 8-min proactive rotation). A header
+toggle (`fu_voice_muted`) turns voice replies off entirely. See the inline
+comments in `index.html` for the reliability knobs — they are all deliberate.
 
 ### Two-Channel Replies (spoken vs shown)
 
-Assistant replies have two channels separated by a literal `[[VISUAL]]` marker:
+Assistant replies split on a literal `[[VISUAL]]` marker: prose before it is
+spoken via TTS; markdown after it renders silently as a `VisualAid` card.
+The streaming client holds back partial markers (`[[VIS` is never voiced),
+stores messages as `{ content, visual }`, and reassembles
+`content + [[VISUAL]] + visual` when sending history back to Claude.
+`sanitizeForSpeech` strips residual markdown before TTS.
 
-- **Spoken** (before the marker) — plain conversational prose, streamed to TTS as it arrives
-- **Shown** (after the marker) — optional markdown bullets/structure, rendered silently as a `VisualAid` card, never spoken
+## API Endpoints
 
-The streaming client splits the channels live (holding back partial markers so `[[VIS` is never voiced), stores assistant messages as `{ content, visual }`, and reassembles `content + [[VISUAL]] + visual` when sending history back to Claude so the model remembers what it displayed. `sanitizeForSpeech` strips any residual markdown/bullets/markers before text reaches TTS — the "reading asterisks aloud" failure mode is fenced at both ends.
+| Endpoint | Purpose |
+|----------|---------|
+| `POST /api/chat-stream` | Streams Claude as simplified SSE (`data: {text}`, `data: [DONE]`); clamps `max_tokens` to 1000; logs cache usage |
+| `POST /api/realtime-session` | Mints 10-min OpenAI Realtime client secret (server VAD, 1.2s end-of-turn) |
+| `POST /api/tts` | Text → audio: raw PCM stream (primary) or MP3; 8s upstream timeout → clean 504 |
+| `POST /api/stt` | Transcribes uploaded audio; OpenAI when `OPENAI_API_KEY` is set, else Groq |
 
-## Styling
+All endpoints are same-origin only (no CORS headers — deliberate).
 
-- Dark theme: `#0f0f1a` background, `#1a1a2e` surfaces
-- Accent: `#ffd21f` (yellow)
-- Hand-drawn doodle iconography (SVG)
-- Animations: `fadeInUp`, `pulse`, `dotPulse`, `waveBar`
-- Mobile-first, responsive, safe-area-inset aware
+## State & Storage
+
+React `useState`/`useRef` only. localStorage keys: `fu_conversations` (capped
+at 50, each stamped with `variant`, `variantName`, `sandboxVersion`,
+`voiceStack`), `fu_active_conversation`, `fu_profile` (`{ name }`),
+`fu_voice_muted`, `fu_sot_variant`. Greeting-only conversations are never
+persisted. There is no history UI — transcripts are read from localStorage
+via DevTools when needed.
 
 ## Environment Variables
 
 ```
-ANTHROPIC_API_KEY=sk-ant-...   # Required — Claude API (chat-stream, chat)
-OPENAI_API_KEY=sk-...          # Required — OpenAI TTS, Realtime STT (hands-free), Whisper STT
-GROQ_API_KEY=gsk_...           # Optional — STT fallback only (whisper-large-v3-turbo)
+ANTHROPIC_API_KEY=sk-ant-...   # Required — Claude (chat-stream)
+OPENAI_API_KEY=sk-...          # Required — TTS, Realtime STT, upload STT
+GROQ_API_KEY=gsk_...           # Optional — STT fallback only
 ```
-
-If `OPENAI_API_KEY` is set, STT uses OpenAI; Groq is only used when OpenAI isn't configured.
-
-## Deployment
-
-Hosted on **Vercel**. Config in `vercel.json`:
-- Clean URLs (no `.html` extensions)
-- SPA rewrites (all non-API routes → `/index.html`)
-- Service Worker headers (no-cache, Service-Worker-Allowed `/`)
-
-## PWA
-
-- Service Worker (`sw.js`) with cache name `feel-understood-v<app-version>` (bumped automatically per release — see Versioning)
-- Static assets (including the vendored React builds) cached on install — fully offline-capable, no CDN
-- API calls always network-first, passed straight through (never cached/cloned, so streaming isn't buffered)
-- Offline fallback to cached `/` (not `/index.html` — `cleanUrls` 308-redirects it, and a cached redirected response is rejected for navigations)
-- Installable to home screen (standalone display mode)
-
-## Voice Reliability & Tuning
-
-Key knobs and behaviors that keep the voice experience smooth (all in `index.html` unless noted):
-
-- **End-of-turn silence (hands-free)**: `silence_duration_ms: 1200` in `api/realtime-session.js` — server-VAD pause length before a turn ends. The dominant latency knob on the primary path: lower = snappier turn-taking, higher = more room to pause and think mid-sentence.
-- **End-of-turn silence (tap-to-talk)**: `SILENCE_MS = 2200` in both fallback STT paths — how long to wait through a pause before treating the user as done. Tap the mic to end immediately.
-- **Barge-in**: while the assistant speaks, `input_audio_buffer.speech_started` aborts the reply stream and playback. Relies on `echoCancellation: true` so the mic doesn't hear the assistant's own voice — verify on speakerphone-style devices.
-- **Self-healing hands-free session**: a dropped WebRTC session (screen off, app switch, network blip, upstream expiry) is rebuilt silently — up to 3 reconnect attempts with short backoff (budget refills on each successful turn and 30s after a healthy rebuild), a rebuild-on-return `visibilitychange` handler for backgrounded PWAs, a transient-`disconnected` grace period before tearing down, mic-track death detection (phone call/Siri), and proactive rotation of sessions older than 8 min at turn-capture time. Session setup is generation-guarded (single-flight): cancelling mid-connect can't leave a ghost hot-mic session, and a rebuild can't double-open. Only mic-level failures (permission denied, no mic) or an exhausted retry budget fall back to tap-to-talk.
-- **TTS model**: `tts-1` (not `tts-1-hd`) in `api/tts.js` — much faster to generate, which matters for per-sentence streaming on an edge function.
-- **TTS timeout**: `api/tts.js` aborts a slow OpenAI call after 8s → clean `504`, so the client retry fires fast instead of waiting for the platform gateway.
-- **TTS retry**: `fetchTTSBuffer` (MP3 path) and `fetchPCMStream` (PCM streaming path) both retry once on `429` (rate limit, longer backoff) or `5xx`/network errors. Other `4xx` are not retried.
-- **Resilient playback**: a single failed/slow sentence never silences the rest — `speak()` and `speakStreaming()` log the error (surfaced via the "Voice failed" banner) and keep going.
-- **Unbuffered streaming**: `api/chat-stream.js` sets `X-Accel-Buffering: no` + `Cache-Control: no-transform` and primes the connection so deltas reach the browser as Claude produces them. The client also carries incomplete SSE lines across reads so chunks split mid-line don't drop words.
-
-## Dependencies
-
-**Runtime**: None in package.json — React 18.3.1 + ReactDOM 18.3.1 UMD builds are vendored in `/vendor` (pinned; refresh by extracting `umd/*.production.min.js` from the npm tarballs)
-
-**Dev**: `sharp@^0.34.5` (icon generation only)
-
-**External APIs**: Anthropic Claude (chat), OpenAI (TTS + primary Whisper STT), Groq (optional STT fallback)
-
-## Browser Support
-
-- **Hands-free realtime (primary)**: any browser with WebRTC + getUserMedia — Chrome, Edge, Safari, Firefox, iOS browsers, the home-screen PWA
-- **Tap-to-talk fallback (native SpeechRecognition)**: Chrome, Edge, Safari, and the home-screen PWA
-- **Tap-to-talk fallback (MediaRecorder → /api/stt)**: iOS Chrome (CriOS), iOS Firefox (FxiOS), iOS Edge (EdgiOS) and other browsers without usable `SpeechRecognition`
-- **No mic support at all**: text input fallback is always available
-
-## Versioning
-
-`package.json` `version` is the **single source of truth**. The version appears
-in three places that must stay in sync: `package.json`, the on-screen label in
-`index.html` (`'vX.Y.Z'`), and the `CACHE_NAME` in `sw.js` (bumping it busts the
-PWA cache on each release).
-
-Never hand-edit these individually. Use the bumper, which updates all three at
-once and **refuses to ever go backwards** (the guard against version
-regressions):
-
-```
-npm run bump          # patch:  2.1.0 -> 2.1.1
-npm run bump minor    #         2.1.0 -> 2.2.0
-npm run bump major    #         2.1.0 -> 3.0.0
-npm run bump 2.5.0    # set an explicit (higher) version
-```
-
-Bump as part of any change you intend to deploy, then commit the result.
 
 ## Development Notes
 
-- No build step — edit `index.html` and deploy
-- API functions in `api/` are auto-deployed as Vercel serverless functions
-- `scripts/generate-icons.mjs` regenerates PWA PNGs from `images/icon-app.svg` (run with `node scripts/generate-icons.mjs`)
-- Conversation history grows per session (client asks for `max_tokens: 700` per response; the server clamps any request to 1000)
-- Original plan (`plan.md`) called for a separate `voice.html` and browser `SpeechSynthesis`/`SpeechRecognition` — the implementation diverged significantly (consolidated into a single `index.html`, OpenAI TTS + Whisper STT fallback, streaming pipeline). See `plan.md`'s status note for details.
+- No build step — edit `index.html` / `styles.css` and deploy.
+- The visible version label is `SANDBOX_VERSION` in `index.html`
+  (`sandbox-0.1`), hardcoded.
+- **Do not** reintroduce per-turn-dynamic content into the system prompt
+  builders (timestamps, counters) — it would kill every prompt-cache hit and
+  contaminate the A/B latency comparison.
+- v0.2 (staged next, per the brief): abstract the voice layer behind one
+  interface and add ElevenLabs / Hume adapters; the A/B prompt toggle stays
+  behind the custom-LLM proxy so prompts × voice stacks cross-combine.

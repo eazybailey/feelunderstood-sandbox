@@ -82,13 +82,10 @@ export default async function handler(req) {
               // Prompt-cache verification readout (sandbox acceptance #7):
               // turn 1 of a session should log cache_creation_input_tokens
               // > 0; turn 2 onwards should log cache_read_input_tokens > 0.
-              // Also forwarded to the client for the dev panel.
+              // Check the Vercel function logs to verify caching works.
               if (parsed.type === 'message_start') {
                 const usage = parsed.message?.usage;
                 console.log('[chat-stream] usage:', JSON.stringify(usage || null));
-                if (usage) {
-                  await writer.write(encoder.encode(`data: ${JSON.stringify({ usage })}\n\n`));
-                }
               }
               if (parsed.type === 'content_block_delta' && parsed.delta?.text) {
                 await writer.write(encoder.encode(`data: ${JSON.stringify({ text: parsed.delta.text })}\n\n`));
