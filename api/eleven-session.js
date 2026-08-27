@@ -23,9 +23,9 @@ export const config = { runtime: 'edge' };
 const XI_ORIGIN = 'https://api.elevenlabs.io';
 const AGENT_NAME = 'feelunderstood-sandbox';
 
-// Warm, calm premade voice (Rachel) — the closest ElevenLabs default to the
-// control stack's OpenAI "shimmer". Override with ELEVENLABS_VOICE_ID.
-const DEFAULT_VOICE_ID = '21m00Tcm4TlvDq8ikWAM';
+// The coach's voice, chosen by ear for this bake-off. Override with
+// ELEVENLABS_VOICE_ID (env wins over this constant).
+const DEFAULT_VOICE_ID = 'aj0fZfXTBc7E3By4X8L2';
 
 // Raw PCM in both directions: 16kHz mic upload (their ASR native rate) and
 // 24kHz agent audio down, which the client splices onto the same gapless

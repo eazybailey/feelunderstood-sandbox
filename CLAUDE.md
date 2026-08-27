@@ -185,7 +185,7 @@ ANTHROPIC_API_KEY=sk-ant-...   # Required — Claude (chat-stream, eleven-llm)
 ELEVENLABS_API_KEY=...         # Required for the elevenlabs stack (default)
 OPENAI_API_KEY=sk-...          # Required for the current stack — TTS, Realtime STT, upload STT
 GROQ_API_KEY=gsk_...           # Optional — STT fallback only
-ELEVENLABS_VOICE_ID=...        # Optional — overrides the default voice (Rachel)
+ELEVENLABS_VOICE_ID=...        # Optional — overrides the default voice
 ```
 
 ## Development Notes
