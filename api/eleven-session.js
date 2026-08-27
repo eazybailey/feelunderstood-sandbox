@@ -65,7 +65,10 @@ const desiredAgentConfig = (llmUrl, token) => ({
       },
     },
     tts: {
-      model_id: 'eleven_flash_v2_5',
+      // English-only agents must use the v2 English models ("English
+      // Agents must use turbo or flash v2" — their create-time validator);
+      // flash_v2_5 is the multilingual variant.
+      model_id: 'eleven_flash_v2',
       voice_id: process.env.ELEVENLABS_VOICE_ID || DEFAULT_VOICE_ID,
       agent_output_audio_format: OUTPUT_FORMAT,
     },
