@@ -17,7 +17,7 @@ reduced to the single Helpline path needed to compare Source-of-Truth prompts.
 | Frontend | React 18.3.1 (vendored UMD builds in `/vendor` — no CDN, no build step; app code is plain `React.createElement`, no JSX/Babel) |
 | Backend | Vercel Functions — Edge Runtime (`chat-stream`, `tts`, `stt`, `realtime-session`, `eleven-session`, `eleven-llm`) |
 | AI | Anthropic Claude API (claude-sonnet-4-6), prompt caching on the system block — same model/params on both voice stacks |
-| Voice (default: `elevenlabs`) | ElevenLabs Agents platform over one WebSocket (their ASR + turn-taking + barge-in + TTS, `eleven_flash_v2_5`, PCM 16k up / 24k down), custom LLM pointed at `/api/eleven-llm` |
+| Voice (default: `elevenlabs`) | ElevenLabs Agents platform over one WebSocket (their ASR + turn-taking + barge-in + TTS, `eleven_flash_v2`, PCM 16k up / 24k down), custom LLM pointed at `/api/eleven-llm` |
 | Voice (control: `current`) | TTS: OpenAI (`tts-1`, `shimmer`) streamed as raw PCM, MP3 fallback. STT primary: OpenAI Realtime over WebRTC (`gpt-4o-mini-transcribe`, server VAD, hands-free); fallbacks: native Web Speech API, then MediaRecorder → `/api/stt` (Groq `whisper-large-v3-turbo` when only `GROQ_API_KEY` is set) |
 | Hosting | Vercel |
 | Styling | Vanilla CSS (light theme only) |
