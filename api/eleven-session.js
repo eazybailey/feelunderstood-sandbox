@@ -138,8 +138,9 @@ export default async function handler(req) {
     // create — that would mint a duplicate agent on every blip)
     const listRes = await xi(`/v1/convai/agents?page_size=100&search=${encodeURIComponent(AGENT_NAME)}`);
     if (!listRes.ok) {
-      console.error('[eleven-session] agent list failed:', listRes.status, (await listRes.text()).slice(0, 500));
-      return new Response(JSON.stringify({ error: 'Could not reach ElevenLabs' }), {
+      const detail = (await listRes.text()).slice(0, 300);
+      console.error('[eleven-session] agent list failed:', listRes.status, detail);
+      return new Response(JSON.stringify({ error: 'Could not reach ElevenLabs', upstream_status: listRes.status, detail }), {
         status: 502,
         headers: { 'Content-Type': 'application/json' },
       });
@@ -154,9 +155,9 @@ export default async function handler(req) {
         body: JSON.stringify({ name: AGENT_NAME, tags: ['feelunderstood-sandbox'], ...agentConfig }),
       });
       if (!createRes.ok) {
-        const err = await createRes.text();
-        console.error('[eleven-session] agent create failed:', createRes.status, err.slice(0, 500));
-        return new Response(JSON.stringify({ error: 'Could not create ElevenLabs agent' }), {
+        const detail = (await createRes.text()).slice(0, 300);
+        console.error('[eleven-session] agent create failed:', createRes.status, detail);
+        return new Response(JSON.stringify({ error: 'Could not create ElevenLabs agent', upstream_status: createRes.status, detail }), {
           status: 502,
           headers: { 'Content-Type': 'application/json' },
         });
@@ -176,9 +177,9 @@ export default async function handler(req) {
 
     const signedRes = await xi(`/v1/convai/conversation/get-signed-url?agent_id=${encodeURIComponent(agentId)}`);
     if (!signedRes.ok) {
-      const err = await signedRes.text();
-      console.error('[eleven-session] signed url failed:', signedRes.status, err.slice(0, 500));
-      return new Response(JSON.stringify({ error: 'Could not create ElevenLabs session' }), {
+      const detail = (await signedRes.text()).slice(0, 300);
+      console.error('[eleven-session] signed url failed:', signedRes.status, detail);
+      return new Response(JSON.stringify({ error: 'Could not create ElevenLabs session', upstream_status: signedRes.status, detail }), {
         status: 502,
         headers: { 'Content-Type': 'application/json' },
       });
