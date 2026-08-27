@@ -1,6 +1,7 @@
 {
   "cleanUrls": true,
   "rewrites": [
+    { "source": "/api/eleven-llm/:path*", "destination": "/api/eleven-llm" },
     { "source": "/((?!api|images|vendor|styles\\.css).*)", "destination": "/index.html" }
   ]
 }
