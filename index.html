@@ -2310,8 +2310,21 @@ GUARDRAILS.
         // same overlap trick as the realtime path; every serial round-trip
         // is a moment where first words fall on a dead mic.
         const sessionPromise = fetch('/api/eleven-session', { method: 'POST' })
-          .then(r => { if (!r.ok) throw new Error('mint-failed'); return r.json(); })
-          .catch(() => null);
+          .then(async (r) => {
+            if (!r.ok) {
+              // Surface the server's actual error — "mint-failed" alone
+              // hides whether the key is missing, ElevenLabs rejected the
+              // agent config, or the signed URL failed.
+              const body = await r.text().catch(() => '');
+              console.error('[eleven] session mint failed:', r.status, body);
+              throw new Error('mint-failed');
+            }
+            return r.json();
+          })
+          .catch((e) => {
+            if (e?.message !== 'mint-failed') console.error('[eleven] session mint unreachable:', e);
+            return null;
+          });
 
         let stream;
         try {
@@ -2377,7 +2390,13 @@ GUARDRAILS.
               } catch (e) { clearTimeout(t); reject(e); }
             };
             ws.onerror = () => { clearTimeout(t); reject(new Error('connection-failed')); };
-            ws.onclose = () => { clearTimeout(t); reject(new Error('connection-failed')); };
+            ws.onclose = (ev) => {
+              // The close reason is where ElevenLabs explains a rejected
+              // handshake (bad signed URL, disallowed override, …).
+              console.error('[eleven] ws closed during setup:', ev.code, ev.reason || '(no reason)');
+              clearTimeout(t);
+              reject(new Error('connection-failed'));
+            };
             ws.onmessage = (e) => {
               let msg; try { msg = JSON.parse(e.data); } catch (err) { return; }
               if (msg.type === 'conversation_initiation_metadata') {
@@ -2386,6 +2405,10 @@ GUARDRAILS.
                 if (rate) outputRate = rate;
                 clearTimeout(t);
                 resolve();
+              } else if (msg.type === 'error') {
+                console.error('[eleven] server error during setup:', e.data);
+                clearTimeout(t);
+                reject(new Error('connection-failed'));
               }
             };
           });
@@ -2475,8 +2498,9 @@ GUARDRAILS.
             }
           };
           ws.onerror = () => {};
-          ws.onclose = () => {
+          ws.onclose = (ev) => {
             if (!cancelled() && activeRef.current) {
+              console.warn('[eleven] ws closed:', ev.code, ev.reason || '(no reason)');
               activeRef.current = false;
               (onDisconnect || onError)('connection-lost');
             }
