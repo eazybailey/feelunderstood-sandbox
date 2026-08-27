@@ -6,6 +6,7 @@
   <link rel="icon" type="image/png" href="/images/favicon-64.png">
   <meta name="theme-color" content="#ffffff">
   <link rel="preconnect" href="https://api.openai.com">
+  <link rel="preconnect" href="https://api.elevenlabs.io">
   <meta name="description" content="Feel Understood — Sandbox. A test rig for A/B testing two versions of the conversation coach.">
   <title>Feel Understood — Sandbox</title>
   <link rel="stylesheet" href="styles.css">
@@ -27,6 +28,7 @@
       profile: 'fu_profile',
       voiceMuted: 'fu_voice_muted',
       sotVariant: 'fu_sot_variant',
+      voiceStack: 'fu_voice_stack',
     };
     const MAX_CONVERSATIONS = 50;
 
@@ -35,10 +37,6 @@
     // a single name → Helpline path with an A/B toggle between two
     // system-prompt variants.
     const SANDBOX_VERSION = 'sandbox-0.1';
-    // The control-condition voice stack for the v0.2 bake-off: today's
-    // pipeline (OpenAI Realtime hands-free STT, with SpeechRecognition /
-    // /api/stt fallbacks → /api/chat-stream → /api/tts).
-    const VOICE_STACK = 'current';
 
     const generateId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 
@@ -65,6 +63,37 @@
 
     const loadProfile = () => loadFromStorage(STORAGE_KEYS.profile, null);
     const saveProfile = (profile) => saveToStorage(STORAGE_KEYS.profile, profile);
+
+    // ── Voice stack (v0.2 bake-off) ──
+    // 'current'    = the control condition: OpenAI Realtime hands-free STT
+    //                (SpeechRecognition / /api/stt fallbacks) →
+    //                /api/chat-stream → /api/tts.
+    // 'elevenlabs' = ElevenLabs Agents platform over one WebSocket (their
+    //                ASR, turn-taking and TTS), with the LLM pointed back
+    //                at our /api/eleven-llm proxy so Claude and the A/B
+    //                prompt toggle stay identical between stacks.
+    // Resolved once per page load — switching stacks reloads the page so
+    // the two pipelines never cohabit.
+    const DEFAULT_VOICE_STACK = 'elevenlabs';
+    const normalizeVoiceStack = (v) => {
+      const s = String(v || '').toLowerCase();
+      if (s === 'e' || s === 'eleven' || s === 'elevenlabs') return 'elevenlabs';
+      if (s === 'c' || s === 'current' || s === 'openai') return 'current';
+      return null;
+    };
+    // ?vs=elevenlabs / ?vs=current (or ?vs=e / ?vs=c) forces the stack and
+    // persists it — same two-links pattern as ?v= for the prompt variant.
+    const urlForcedVoiceStack = (() => {
+      try { return normalizeVoiceStack(new URLSearchParams(location.search).get('vs')); }
+      catch { return null; }
+    })();
+    const VOICE_STACK = (() => {
+      if (urlForcedVoiceStack) {
+        saveToStorage(STORAGE_KEYS.voiceStack, urlForcedVoiceStack);
+        return urlForcedVoiceStack;
+      }
+      return normalizeVoiceStack(loadFromStorage(STORAGE_KEYS.voiceStack, null)) || DEFAULT_VOICE_STACK;
+    })();
 
     // ── System Prompt Builder ──
     // Dispatches to the active A/B Source of Truth variant's builder.
@@ -2163,6 +2192,390 @@ GUARDRAILS.
       return { speakStreaming, cancel, getLastError };
     };
 
+    // ── ElevenLabs Voice Stack (Agents platform over raw WebSocket) ──
+    //
+    // The v0.2 challenger stack. One tap opens a continuous conversation:
+    // mic PCM streams up a signed WebSocket minted by /api/eleven-session,
+    // ElevenLabs runs ASR + turn-taking + barge-in + TTS server-side, and
+    // the LLM behind their agent is our own /api/eleven-llm proxy (Claude +
+    // the A/B prompt, sent per session via custom_llm_extra_body) — so only
+    // the ears and mouth differ from the control stack. This speaks their
+    // documented Agents WebSocket contract directly rather than pulling in
+    // their SDK, keeping the no-build vendored-deps rule intact.
+
+    const b64ToInt16 = (b64) => {
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return new Int16Array(bytes.buffer, 0, bytes.length >> 1);
+    };
+
+    const int16ToB64 = (int16) => {
+      const bytes = new Uint8Array(int16.buffer, int16.byteOffset, int16.byteLength);
+      let bin = '';
+      const CHUNK = 0x8000; // String.fromCharCode arg-count limit headroom
+      for (let i = 0; i < bytes.length; i += CHUNK) {
+        bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+      }
+      return btoa(bin);
+    };
+
+    // ElevenLabs ASR ingests 16kHz PCM16 (configured in eleven-session.js).
+    const ELEVEN_INPUT_RATE = 16000;
+
+    const useElevenLabsVoice = () => {
+      const wsRef = React.useRef(null);
+      const streamRef = React.useRef(null);
+      const micNodesRef = React.useRef(null);   // { source, processor, sink, analyser }
+      const levelRef = React.useRef(0);
+      const levelAnimRef = React.useRef(null);
+      const activeRef = React.useRef(false);
+      // Same generation-counter pattern as useRealtimeSTT: endSession bumps
+      // it and every await re-checks, so a teardown mid-setup can't leave a
+      // ghost session with a hot mic.
+      const genRef = React.useRef(0);
+      // True while the rest of the current agent turn's audio should be
+      // dropped (manual barge-in / escape hatch); cleared on the next
+      // captured user turn.
+      const suppressRef = React.useRef(false);
+      const speakingRef = React.useRef(false);
+      // Gapless playback state — same technique as the TTS PCM path:
+      // agent PCM resampled to the context rate with interpolation state
+      // carried across chunks, buffers butt-joined on the timeline.
+      const playRef = React.useRef(null);       // { sources, nextStart, tail, pos, rate }
+
+      const supported = typeof window !== 'undefined'
+        && !!window.WebSocket
+        && !!navigator.mediaDevices?.getUserMedia
+        && !!(window.AudioContext || window.webkitAudioContext);
+
+      const stopPlayback = () => {
+        speakingRef.current = false;
+        const p = playRef.current;
+        if (!p) return;
+        for (const src of p.sources) {
+          src.onended = null;
+          try { src.stop(); } catch (e) {}
+        }
+        p.sources.clear();
+        p.nextStart = 0;
+        p.tail = new Float32Array(0);
+        p.pos = 0;
+      };
+
+      const suppressTurn = () => {
+        suppressRef.current = true;
+        stopPlayback();
+      };
+
+      const endSession = () => {
+        genRef.current++;
+        activeRef.current = false;
+        suppressRef.current = false;
+        if (levelAnimRef.current) { cancelAnimationFrame(levelAnimRef.current); levelAnimRef.current = null; }
+        if (micNodesRef.current) {
+          const n = micNodesRef.current;
+          try { n.processor.onaudioprocess = null; } catch (e) {}
+          try { n.source.disconnect(); } catch (e) {}
+          try { n.processor.disconnect(); } catch (e) {}
+          try { n.sink.disconnect(); } catch (e) {}
+          micNodesRef.current = null;
+        }
+        if (wsRef.current) {
+          const ws = wsRef.current;
+          wsRef.current = null;
+          try {
+            ws.onopen = null; ws.onmessage = null; ws.onerror = null; ws.onclose = null;
+            ws.close(1000, 'User ended conversation');
+          } catch (e) {}
+        }
+        if (streamRef.current) { streamRef.current.getTracks().forEach(t => t.stop()); streamRef.current = null; }
+        stopPlayback();
+        levelRef.current = 0;
+      };
+
+      React.useEffect(() => () => endSession(), []);
+
+      const startSession = async ({
+        firstMessage, systemPrompt, extraBody, getMuted,
+        onInterim, onUserTranscript, onAgentTentative, onAgentResponse,
+        onAgentCorrection, onSpeakStart, onSpeakEnd, onInterrupted,
+        onError, onDisconnect,
+      }) => {
+        endSession();
+        const myGen = genRef.current;
+        const cancelled = () => genRef.current !== myGen;
+
+        // Mint the session while the mic permission/device spins up — the
+        // same overlap trick as the realtime path; every serial round-trip
+        // is a moment where first words fall on a dead mic.
+        const sessionPromise = fetch('/api/eleven-session', { method: 'POST' })
+          .then(r => { if (!r.ok) throw new Error('mint-failed'); return r.json(); })
+          .catch(() => null);
+
+        let stream;
+        try {
+          // Echo cancellation keeps the open mic from hearing the agent.
+          stream = await navigator.mediaDevices.getUserMedia({
+            audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+          });
+        } catch (e) {
+          const name = e?.name || '';
+          if (cancelled()) return false;
+          if (name === 'NotAllowedError' || name === 'SecurityError' || name === 'PermissionDeniedError') {
+            onError('not-allowed');
+          } else if (name === 'NotFoundError' || name === 'OverconstrainedError') {
+            onError('no-mic');
+          } else {
+            onError('mic-failed');
+          }
+          return false;
+        }
+        if (cancelled()) { stream.getTracks().forEach(t => t.stop()); return false; }
+        streamRef.current = stream;
+        stream.getTracks().forEach(t => {
+          t.onended = () => { if (!cancelled() && activeRef.current) onError('connection-lost'); };
+        });
+
+        let ws = null;
+        try {
+          const session = await sessionPromise;
+          if (cancelled()) throw new Error('cancelled');
+          if (!session || !session.signed_url) throw new Error('mint-failed');
+
+          // The mic tap that started this session already ran the global
+          // ensureAudioContext listener; without a running context there is
+          // neither capture nor playback.
+          ensureAudioContext();
+          const ctx = audioCtx;
+          if (!ctx || ctx.state !== 'running') throw new Error('audio-failed');
+
+          ws = new WebSocket(session.signed_url, ['convai']);
+          wsRef.current = ws;
+
+          // The server configures pcm_24000 out / pcm_16000 in; trust the
+          // metadata event if it says otherwise.
+          let outputRate = session.output_sample_rate || 24000;
+          await new Promise((resolve, reject) => {
+            const t = setTimeout(() => reject(new Error('open-timeout')), 12000);
+            ws.onopen = () => {
+              try {
+                ws.send(JSON.stringify({
+                  type: 'conversation_initiation_client_data',
+                  // Prompt override as belt-and-braces next to fu_system in
+                  // the extra body — the proxy prefers the verbatim extra-
+                  // body copy (byte-identical cache prefix) and falls back
+                  // to this one.
+                  conversation_config_override: {
+                    agent: {
+                      prompt: { prompt: systemPrompt },
+                      first_message: firstMessage,
+                    },
+                  },
+                  custom_llm_extra_body: extraBody || {},
+                }));
+              } catch (e) { clearTimeout(t); reject(e); }
+            };
+            ws.onerror = () => { clearTimeout(t); reject(new Error('connection-failed')); };
+            ws.onclose = () => { clearTimeout(t); reject(new Error('connection-failed')); };
+            ws.onmessage = (e) => {
+              let msg; try { msg = JSON.parse(e.data); } catch (err) { return; }
+              if (msg.type === 'conversation_initiation_metadata') {
+                const fmt = msg.conversation_initiation_metadata_event?.agent_output_audio_format || '';
+                const rate = parseInt(fmt.split('_')[1], 10);
+                if (rate) outputRate = rate;
+                clearTimeout(t);
+                resolve();
+              }
+            };
+          });
+          if (cancelled()) throw new Error('cancelled');
+
+          playRef.current = { sources: new Set(), nextStart: 0, tail: new Float32Array(0), pos: 0, rate: outputRate };
+
+          const scheduleAudio = (b64) => {
+            const p = playRef.current;
+            if (!p || !audioCtx || audioCtx.state !== 'running') return;
+            const int16 = b64ToInt16(b64);
+            if (!int16.length) return;
+            // outputRate → context rate; interpolation carried across
+            // chunks so butt-joined buffers play back click-free (see the
+            // resampler comment in the TTS PCM path).
+            const step = p.rate / audioCtx.sampleRate;
+            const inBuf = new Float32Array(p.tail.length + int16.length);
+            inBuf.set(p.tail, 0);
+            for (let i = 0; i < int16.length; i++) inBuf[p.tail.length + i] = int16[i] / 32768;
+            const out = [];
+            let pos = p.pos;
+            while (pos < inBuf.length - 1) {
+              const i0 = pos | 0;
+              const frac = pos - i0;
+              out.push(inBuf[i0] + (inBuf[i0 + 1] - inBuf[i0]) * frac);
+              pos += step;
+            }
+            const keepFrom = Math.min(pos | 0, Math.max(inBuf.length - 1, 0));
+            p.tail = inBuf.subarray(keepFrom);
+            p.pos = pos - keepFrom;
+            if (!out.length) return;
+            const buf = audioCtx.createBuffer(1, out.length, audioCtx.sampleRate);
+            buf.copyToChannel(Float32Array.from(out), 0);
+            const src = audioCtx.createBufferSource();
+            src.buffer = buf;
+            src.connect(audioCtx.destination);
+            const startAt = Math.max(p.nextStart, audioCtx.currentTime + 0.05);
+            src.onended = () => {
+              p.sources.delete(src);
+              // Drained = the agent finished (or the network starved — in
+              // which case the next chunk re-fires onSpeakStart).
+              if (p.sources.size === 0 && speakingRef.current) {
+                speakingRef.current = false;
+                if (onSpeakEnd) onSpeakEnd();
+              }
+            };
+            p.sources.add(src);
+            src.start(startAt);
+            p.nextStart = startAt + buf.duration;
+            if (!speakingRef.current) {
+              speakingRef.current = true;
+              if (onSpeakStart) onSpeakStart();
+            }
+          };
+
+          ws.onmessage = (e) => {
+            if (cancelled()) return;
+            let msg; try { msg = JSON.parse(e.data); } catch (err) { return; }
+            if (msg.type === 'ping') {
+              try { ws.send(JSON.stringify({ type: 'pong', event_id: msg.ping_event?.event_id })); } catch (err) {}
+            } else if (msg.type === 'audio') {
+              const b64 = msg.audio_event?.audio_base_64;
+              if (b64 && !suppressRef.current && !(getMuted && getMuted())) scheduleAudio(b64);
+            } else if (msg.type === 'user_transcript') {
+              suppressRef.current = false;
+              const text = (msg.user_transcription_event?.user_transcript || '').trim();
+              if (text) onUserTranscript(text);
+              else onInterim('');
+            } else if (msg.type === 'tentative_user_transcript') {
+              const ev = msg.tentative_user_transcription_event || {};
+              const text = (ev.tentative_user_transcript || ev.user_transcript || '').trim();
+              if (text) onInterim(text);
+            } else if (msg.type === 'agent_response') {
+              onAgentResponse((msg.agent_response_event?.agent_response || '').trim());
+            } else if (msg.type === 'internal_tentative_agent_response') {
+              const text = (msg.tentative_agent_response_internal_event?.tentative_agent_response || '').trim();
+              if (text && onAgentTentative) onAgentTentative(text);
+            } else if (msg.type === 'agent_response_correction') {
+              const text = (msg.agent_response_correction_event?.corrected_agent_response || '').trim();
+              if (text && onAgentCorrection) onAgentCorrection(text);
+            } else if (msg.type === 'interruption') {
+              // Server-side barge-in: the user talked over the agent.
+              stopPlayback();
+              if (onInterrupted) onInterrupted();
+            } else if (msg.type === 'error') {
+              onError(msg.error_event?.message || 'session-error');
+            }
+          };
+          ws.onerror = () => {};
+          ws.onclose = () => {
+            if (!cancelled() && activeRef.current) {
+              activeRef.current = false;
+              (onDisconnect || onError)('connection-lost');
+            }
+          };
+
+          // Mic pump: ScriptProcessor is deprecated but dependency-free —
+          // this repo has no build step, and an AudioWorklet would need a
+          // module file. 4096 frames ≈ 85ms of 16k audio per send.
+          const source = ctx.createMediaStreamSource(stream);
+          const processor = ctx.createScriptProcessor(4096, 1, 1);
+          let dsTail = new Float32Array(0);
+          let dsPos = 0;
+          const dsStep = ctx.sampleRate / ELEVEN_INPUT_RATE;
+          processor.onaudioprocess = (e) => {
+            if (cancelled() || !wsRef.current || wsRef.current.readyState !== 1) return;
+            const input = e.inputBuffer.getChannelData(0);
+            const inBuf = new Float32Array(dsTail.length + input.length);
+            inBuf.set(dsTail, 0);
+            inBuf.set(input, dsTail.length);
+            const out = [];
+            let pos = dsPos;
+            while (pos < inBuf.length - 1) {
+              const i0 = pos | 0;
+              const frac = pos - i0;
+              const v = inBuf[i0] + (inBuf[i0 + 1] - inBuf[i0]) * frac;
+              out.push(Math.max(-32768, Math.min(32767, Math.round(v * 32767))));
+              pos += dsStep;
+            }
+            const keepFrom = Math.min(pos | 0, Math.max(inBuf.length - 1, 0));
+            dsTail = inBuf.subarray(keepFrom);
+            dsPos = pos - keepFrom;
+            if (!out.length) return;
+            try {
+              wsRef.current.send(JSON.stringify({ user_audio_chunk: int16ToB64(Int16Array.from(out)) }));
+            } catch (err) {}
+          };
+          // A zero-gain sink keeps the processor pulling (some browsers
+          // won't run an unconnected ScriptProcessor) without echoing the
+          // mic to the speakers.
+          const sink = ctx.createGain();
+          sink.gain.value = 0;
+          source.connect(processor);
+          processor.connect(sink);
+          sink.connect(ctx.destination);
+
+          // Mic level for the visualizer — same affordance as the other
+          // paths, tapped off the same shared context.
+          let analyser = null;
+          try {
+            analyser = ctx.createAnalyser();
+            analyser.fftSize = 1024;
+            source.connect(analyser);
+            const buf = new Uint8Array(analyser.frequencyBinCount);
+            const tick = () => {
+              if (!micNodesRef.current) return;
+              analyser.getByteTimeDomainData(buf);
+              let sum = 0;
+              for (let i = 0; i < buf.length; i++) {
+                const v = (buf[i] - 128) / 128;
+                sum += v * v;
+              }
+              levelRef.current = Math.sqrt(sum / buf.length);
+              levelAnimRef.current = requestAnimationFrame(tick);
+            };
+            levelAnimRef.current = requestAnimationFrame(tick);
+          } catch (e) { /* level meter is best-effort */ }
+          micNodesRef.current = { source, processor, sink, analyser };
+
+          activeRef.current = true;
+          return true;
+        } catch (e) {
+          if (cancelled() || e?.message === 'cancelled') {
+            try { if (ws) ws.close(1000); } catch (err) {}
+            stream.getTracks().forEach(t => t.stop());
+            return false;
+          }
+          endSession();
+          onError(e?.message === 'mint-failed' ? 'session-unavailable' : 'session-failed');
+          return false;
+        }
+      };
+
+      const isActive = () => activeRef.current
+        && !!wsRef.current && wsRef.current.readyState === 1
+        && !!streamRef.current
+        && streamRef.current.getAudioTracks().some(t => t.readyState === 'live');
+      const getLevel = () => levelRef.current;
+      // Typed message into a live session — ElevenLabs adds it to the
+      // conversation and the agent replies with voice.
+      const sendText = (text) => {
+        try { wsRef.current?.send(JSON.stringify({ type: 'user_message', text })); } catch (e) {}
+      };
+      // Interface parity with useRealtimeSTT (typed-supersede path) — the
+      // ElevenLabs turn model has no client-side input buffer to clear.
+      const clearInput = () => {};
+
+      return { supported, startSession, endSession, isActive, getLevel, sendText, suppressTurn, stopPlayback, clearInput };
+    };
+
     // ── Typing Indicator ──
     const TypingIndicator = () => {
       return React.createElement('div', { className: 'msg-row assistant' },
@@ -2297,6 +2710,9 @@ GUARDRAILS.
         // — fall through to a fresh greeting instead. The old transcript
         // stays in storage with its original variant stamp.
         if (convo && convo.variant && convo.variant !== loadSotVariant()) return null;
+        // Same rule for the voice stack: one transcript, one stack — a
+        // conversation held under the other stack is never resumed.
+        if (convo && convo.voiceStack && convo.voiceStack !== VOICE_STACK) return null;
         return convo;
       }, []);
 
@@ -2339,6 +2755,14 @@ GUARDRAILS.
         useRecorderFallback ? recorderSTT : nativeSTT;
       const { speakStreaming, cancel: cancelSpeak, getLastError: getTtsError } = useSpeechSynthesis();
       const realtime = useRealtimeSTT();
+      const eleven = useElevenLabsVoice();
+      // The active voice stack (resolved once per load). `session` is the
+      // hands-free engine the shared lifecycle below drives — the OpenAI
+      // realtime hook or the ElevenLabs hook expose the same surface
+      // (startSession via openSessionRef / endSession / isActive /
+      // getLevel), so the self-healing machinery is stack-agnostic.
+      const isEleven = VOICE_STACK === 'elevenlabs';
+      const session = isEleven ? eleven : realtime;
       // Hands-free realtime conversation: one tap opens a continuous
       // session; turns are detected server-side, and the user can barge in
       // while the assistant speaks. realtimeEnabledRef flips false after a
@@ -2386,6 +2810,7 @@ GUARDRAILS.
           // Muting mid-reply silences playback immediately; the reply
           // keeps streaming into the chat as text.
           cancelSpeak();
+          if (isEleven) eleven.stopPlayback();
           if (voiceStateRef.current === 'speaking') {
             const v = handsFreeRef.current ? 'listening' : 'idle';
             voiceStateRef.current = v;
@@ -2405,7 +2830,7 @@ GUARDRAILS.
           handsFreeRef.current = false;
           setHandsFree(false);
         }
-        realtime.endSession();
+        session.endSession();
         streamAbortRef.current?.abort();
         abortRec();
         cancelSpeak();
@@ -2472,6 +2897,14 @@ GUARDRAILS.
         // The mic stays off until the user's first "Tap to talk" — the
         // greeting speaks, then one tap opens the hands-free session.
 
+        // ElevenLabs stack: the agent itself speaks the greeting when the
+        // first mic tap opens the session (first_message override), so no
+        // OpenAI TTS may touch this stack. Until then it sits as text.
+        if (isEleven) {
+          setVoiceState('idle');
+          return;
+        }
+
         // Voice replies off: show the greeting as text and rest at idle.
         if (voiceMutedRef.current) {
           setVoiceState('idle');
@@ -2502,7 +2935,11 @@ GUARDRAILS.
         });
       };
 
-      const sendToClaude = async (userText) => {
+      const sendToClaude = async (userText, opts = {}) => {
+        // opts.speak === false suppresses TTS for this turn — used by the
+        // ElevenLabs stack's no-session text fallback, where an OpenAI
+        // voice would contaminate the bake-off.
+        const allowSpeak = opts.speak !== false;
         // A new turn supersedes any still-streaming previous one — kill its
         // stream AND its audio. Aborting the fetch alone leaves the old
         // reply's already-scheduled PCM chunks playing (and its speaker
@@ -2690,7 +3127,7 @@ GUARDRAILS.
                   // where barge-in can't fire), don't start talking over
                   // them — the text still streams, and their completed turn
                   // will supersede this reply anyway.
-                  if (fireChunk && fireChunk.length > 0 && !voiceMutedRef.current && !userSpeakingRef.current) {
+                  if (fireChunk && fireChunk.length > 0 && allowSpeak && !voiceMutedRef.current && !userSpeakingRef.current) {
                     if (!streamSpeaker) {
                       streamSpeaker = speakStreaming();
                       // Sync the ref before React re-renders: barge-in
@@ -2715,7 +3152,7 @@ GUARDRAILS.
 
           // Handle any remaining text that didn't end with punctuation
           const remaining = sentenceBuffer.trim();
-          if (remaining.length > 0 && !voiceMutedRef.current && !userSpeakingRef.current) {
+          if (remaining.length > 0 && allowSpeak && !voiceMutedRef.current && !userSpeakingRef.current) {
             if (!streamSpeaker) {
               streamSpeaker = speakStreaming();
               voiceStateRef.current = 'speaking'; // see comment above
@@ -2798,7 +3235,7 @@ GUARDRAILS.
 
       const cycleRealtimeSession = async () => {
         if (!handsFreeRef.current || reconnectingRef.current) return;
-        realtime.endSession();
+        session.endSession();
         const ok = await connectRealtime();
         if (!ok && handsFreeRef.current && !reconnectingRef.current) {
           handleRealtimeError('connection-lost');
@@ -2809,12 +3246,17 @@ GUARDRAILS.
       const failHandsFree = (err) => {
         handsFreeRef.current = false;
         setHandsFree(false);
-        realtime.endSession();
+        session.endSession();
         userSpeakingRef.current = false;
         if (err === 'not-allowed') {
           setError('Microphone blocked. Tap the lock/site icon in the address bar to allow it, then try again.');
         } else if (err === 'no-mic') {
           setError('No microphone detected on this device.');
+          setTimeout(() => setError(null), 6000);
+        } else if (isEleven) {
+          // No cross-stack fallback: the OpenAI tap-to-talk path would
+          // contaminate the bake-off. Leave the mic armed for another try.
+          setError('Voice connection failed — tap the mic to try again, or type below.');
           setTimeout(() => setError(null), 6000);
         } else {
           realtimeEnabledRef.current = false;
@@ -2843,7 +3285,7 @@ GUARDRAILS.
         if (document.visibilityState === 'hidden') {
           // Don't rebuild into a hidden tab — the visibility handler does
           // it the moment the app comes back.
-          realtime.endSession();
+          session.endSession();
           return;
         }
         // A driven attempt is already in flight — its driver observes the
@@ -2853,7 +3295,7 @@ GUARDRAILS.
         try {
           while (handsFreeRef.current && reconnectAttemptsRef.current < 3) {
             reconnectAttemptsRef.current++;
-            realtime.endSession();
+            session.endSession();
             // Backoff: an instant redial into the same outage is doomed.
             await new Promise(r => setTimeout(r, 700 * reconnectAttemptsRef.current));
             if (!handsFreeRef.current || document.visibilityState === 'hidden') return;
@@ -2923,7 +3365,153 @@ GUARDRAILS.
           setRtConnecting(false);
         }
       };
-      openSessionRef.current = openRealtimeSession;
+      // ── ElevenLabs hands-free session (voice stack: elevenlabs) ──
+      // Plugs into the SAME self-healing lifecycle as the realtime path:
+      // openSessionRef points here when this stack is active, so
+      // connectRealtime, the retry/backoff loop and the visibility rebuild
+      // all drive it unchanged. ASR, end-of-turn and barge-in live on
+      // ElevenLabs' side; this code only mirrors their events into the
+      // conversation state.
+
+      // True while the last assistant bubble is a live (tentative) reply
+      // being updated in place as the agent generates.
+      const elevenPendingRef = React.useRef(false);
+
+      const appendUserTurn = (text) => {
+        const prev = messagesRef.current;
+        const last = prev[prev.length - 1];
+        // A typed user_message can come back as its own transcript — never
+        // double-post the identical turn.
+        if (last && last.role === 'user' && last.content.trim() === text.trim()) return;
+        // Merge back-to-back user turns, same as sendToClaude, so history
+        // keeps alternating roles.
+        const updated = last && last.role === 'user'
+          ? [...prev.slice(0, -1), { role: 'user', content: `${last.content}\n${text}` }]
+          : [...prev, { role: 'user', content: text }];
+        elevenPendingRef.current = false;
+        messagesRef.current = updated;
+        setMessages(updated);
+      };
+
+      const setAssistantTurn = (text, final) => {
+        const t = (text || '').trim();
+        if (!t) return;
+        const prev = messagesRef.current;
+        const last = prev[prev.length - 1];
+        let updated;
+        if (elevenPendingRef.current && last && last.role === 'assistant') {
+          updated = [...prev.slice(0, -1), { role: 'assistant', content: t }];
+        } else {
+          // The greeting is already on screen when the agent speaks it
+          // (first_message override) and echoes back as an agent_response —
+          // skip anything that's the last bubble's text or a prefix of it.
+          if (last && last.role === 'assistant'
+              && (last.content.trim() === t || last.content.trim().startsWith(t))) {
+            elevenPendingRef.current = false;
+            return;
+          }
+          updated = [...prev, { role: 'assistant', content: t }];
+        }
+        elevenPendingRef.current = !final;
+        messagesRef.current = updated;
+        setMessages(updated);
+      };
+
+      // After a barge-in ElevenLabs sends the truncation of what was
+      // actually spoken — keep the transcript honest about what was heard.
+      const applyElevenCorrection = (text) => {
+        const t = (text || '').trim();
+        const prev = messagesRef.current;
+        const last = prev[prev.length - 1];
+        if (!t || !last || last.role !== 'assistant') return;
+        const updated = [...prev.slice(0, -1), { role: 'assistant', content: t }];
+        elevenPendingRef.current = false;
+        messagesRef.current = updated;
+        setMessages(updated);
+      };
+
+      const openElevenSession = async () => {
+        setRtConnecting(true);
+        try {
+          const msgs = messagesRef.current;
+          const hasUserTurn = msgs.some(m => m.role === 'user');
+          const systemPrompt = buildSystemPrompt(profileRef.current, sotVariantRef.current);
+          // Fresh conversation: the agent speaks the greeting already on
+          // screen (first_message override) and ElevenLabs records it, so
+          // no history rides along. Resumed conversation (or a session
+          // rebuild): full history goes in the extra body — ElevenLabs
+          // only knows the live session's turns — and the agent stays
+          // quiet until the user speaks.
+          const firstMessage = hasUserTurn
+            ? ''
+            : ((msgs.find(m => m.role === 'assistant') || {}).content || buildGreeting(profileRef.current));
+          const history = hasUserTurn
+            ? msgs.slice(-24).map(m => ({
+                role: m.role,
+                // Reassemble both channels, like sendToClaude, so the model
+                // remembers what it displayed, not just what it said.
+                content: m.visual ? `${m.content}\n[[VISUAL]]\n${m.visual}` : m.content,
+              }))
+            : [];
+          const ok = await eleven.startSession({
+            firstMessage,
+            systemPrompt,
+            extraBody: {
+              fu_system: systemPrompt,
+              fu_variant: sotVariantRef.current,
+              fu_history: history,
+              fu_max_tokens: 700,
+            },
+            getMuted: () => voiceMutedRef.current,
+            onInterim: (t) => { if (handsFreeRef.current) setInterimText(t); },
+            onUserTranscript: (text) => {
+              if (!handsFreeRef.current) return;
+              reconnectAttemptsRef.current = 0; // healthy session — reset budget
+              userSpeakingRef.current = false;
+              setInterimText('');
+              appendUserTurn(text);
+              voiceStateRef.current = 'processing';
+              setVoiceState('processing');
+            },
+            onAgentTentative: (t) => { if (handsFreeRef.current) setAssistantTurn(t, false); },
+            onAgentResponse: (t) => {
+              setAssistantTurn(t, true);
+              // A muted turn never gets audio, so no onSpeakStart/End will
+              // move the state — step down here.
+              if (handsFreeRef.current && voiceStateRef.current === 'processing' && voiceMutedRef.current) {
+                voiceStateRef.current = 'listening';
+                setVoiceState('listening');
+              }
+            },
+            onAgentCorrection: applyElevenCorrection,
+            onSpeakStart: () => {
+              if (!handsFreeRef.current) return;
+              voiceStateRef.current = 'speaking';
+              setVoiceState('speaking');
+            },
+            onSpeakEnd: () => {
+              if (voiceStateRef.current !== 'speaking') return;
+              const v = handsFreeRef.current ? 'listening' : 'idle';
+              voiceStateRef.current = v;
+              setVoiceState(v);
+            },
+            onInterrupted: () => {
+              // Server-side barge-in: the user talked over the agent.
+              if (!handsFreeRef.current) return;
+              voiceStateRef.current = 'listening';
+              setVoiceState('listening');
+            },
+            onError: handleRealtimeError,
+            onDisconnect: () => handleRealtimeError('connection-lost'),
+          });
+          if (ok) sessionStartedAtRef.current = Date.now();
+          return ok;
+        } finally {
+          setRtConnecting(false);
+        }
+      };
+
+      openSessionRef.current = isEleven ? openElevenSession : openRealtimeSession;
 
       // When the PWA comes back from the background, quietly rebuild the
       // session if it died while we were away.
@@ -2933,7 +3521,7 @@ GUARDRAILS.
           if (!handsFreeRef.current || reconnectingRef.current) return;
           // isActive() also checks the mic track is live — a session whose
           // track the OS killed while backgrounded needs the rebuild too.
-          if (realtime.isActive()) return;
+          if (session.isActive()) return;
           const ok = await connectRealtime();
           if (!ok && handsFreeRef.current && !reconnectingRef.current) {
             handleRealtimeError('connection-lost');
@@ -2961,7 +3549,7 @@ GUARDRAILS.
       const endHandsFree = () => {
         handsFreeRef.current = false;
         setHandsFree(false);
-        realtime.endSession();
+        session.endSession();
         streamAbortRef.current?.abort();
         cancelSpeak();
         userSpeakingRef.current = false;
@@ -2972,6 +3560,32 @@ GUARDRAILS.
       };
 
       const handleMicClick = () => {
+        if (isEleven) {
+          // ElevenLabs stack: the mic button only ever drives the agent
+          // session — there is no tap-to-talk fallback to fall into.
+          if (handsFreeRef.current) {
+            if (voiceState === 'speaking' || voiceState === 'processing') {
+              // Manual barge-in / escape hatch: stop playback and drop the
+              // rest of this turn's audio; the conversation stays open and
+              // the reply still lands as text.
+              eleven.suppressTurn();
+              voiceStateRef.current = 'listening';
+              setVoiceState('listening');
+              return;
+            }
+            endHandsFree();
+            return;
+          }
+          if (voiceState === 'speaking' || voiceState === 'processing') return;
+          if (!eleven.supported) {
+            setError('Voice not supported in this browser. Use the text input below.');
+            setTimeout(() => setError(null), 6000);
+            return;
+          }
+          startHandsFree();
+          return;
+        }
+
         if (handsFreeRef.current) {
           // A hands-free conversation is live.
           if (voiceState === 'speaking') {
@@ -3099,6 +3713,28 @@ GUARDRAILS.
         // tester can interrupt the ~30s greeting without granting mic
         // access. Previously the composer was locked for the whole reply.
         if (!textInput.trim()) return;
+        if (isEleven) {
+          const text = textInput.trim();
+          setInterimText('');
+          if (voiceStateRef.current === 'speaking') eleven.suppressTurn();
+          if (handsFreeRef.current && eleven.isActive()) {
+            // Typed turn into the live session: show it, hand it to the
+            // agent (ElevenLabs adds it to its conversation), voice reply
+            // comes back through the same audio pipeline.
+            appendUserTurn(text);
+            eleven.sendText(text);
+            voiceStateRef.current = 'processing';
+            setVoiceState('processing');
+          } else {
+            // No live session — text-only turn through the control-stack
+            // proxy with TTS suppressed, so no OpenAI voice pollutes this
+            // stack. The turn reaches the agent on the next session via
+            // fu_history.
+            sendToClaude(text, { speak: false });
+          }
+          setTextInput('');
+          return;
+        }
         if (voiceState === 'listening') {
           // User switched to typing mid-listen. Tap-to-talk: drop the mic
           // session so its silence timer can't fire a second, competing
@@ -3151,6 +3787,21 @@ GUARDRAILS.
         setError(null);
       };
 
+      // ── Voice stack switching (v0.2 bake-off) ──
+      // Like the prompt variant, a stack never mixes within one transcript:
+      // switching starts a fresh conversation. The page reloads so the two
+      // pipelines never cohabit, and the ?vs= param is dropped so it can't
+      // force the old stack straight back.
+      const handleVoiceStackSwitch = () => {
+        const next = VOICE_STACK === 'elevenlabs' ? 'current' : 'elevenlabs';
+        const hasUserTurn = messagesRef.current.some(m => m.role === 'user');
+        if (hasUserTurn && !window.confirm(`Switch voice to "${next}"? This starts a fresh conversation.`)) return;
+        stopVoicePipeline();
+        saveToStorage(STORAGE_KEYS.voiceStack, next);
+        saveToStorage(STORAGE_KEYS.activeId, null);
+        location.href = location.pathname;
+      };
+
       const handleStartOver = () => {
         // Full reset means full reset: the gate promises "conversations are
         // stored only on this device", so handing the device to the next
@@ -3184,6 +3835,9 @@ GUARDRAILS.
         return React.createElement(NameScreen, { onComplete: handleNameComplete });
       }
 
+      const voiceSupported = isEleven
+        ? eleven.supported
+        : (realtime.supported && realtimeEnabledRef.current) || sttSupported;
       const statusLabel = handsFree
         ? {
             idle: 'Tap to talk',
@@ -3192,12 +3846,12 @@ GUARDRAILS.
             speaking: 'Talk to interrupt',
           }[voiceState]
         : {
-            idle: (realtime.supported && realtimeEnabledRef.current) || sttSupported ? 'Tap to talk' : 'Type below',
+            idle: voiceSupported ? 'Tap to talk' : 'Type below',
             listening: 'Listening...',
             processing: 'Thinking...',
             // Tapping mid-speech now interrupts AND starts listening on the
             // hands-free path; plain stop on the tap-to-talk fallback.
-            speaking: (realtime.supported && realtimeEnabledRef.current) ? 'Tap to interrupt' : 'Tap to stop',
+            speaking: (!isEleven && realtime.supported && realtimeEnabledRef.current) ? 'Tap to interrupt' : 'Tap to stop',
           }[voiceState];
 
       // ── Chat UI ──
@@ -3290,7 +3944,7 @@ GUARDRAILS.
           React.createElement('div', { className: 'mic-area' },
             voiceState === 'listening' && React.createElement(WaveVisualizer, {
               getLevel: handsFree
-                ? realtime.getLevel
+                ? session.getLevel
                 : (useRecorderFallback ? recorderSTT.getLevel : null),
             }),
             React.createElement('button', {
@@ -3333,13 +3987,19 @@ GUARDRAILS.
             )
           ),
 
-          !sttSupported && React.createElement('p', { className: 'browser-warn' },
+          !voiceSupported && React.createElement('p', { className: 'browser-warn' },
             'Voice not supported in this browser. Type below instead.'
           ),
 
           // Version label + full device reset (hand-off between testers)
           React.createElement('p', { className: 'version-label' },
             SANDBOX_VERSION,
+            ' · ',
+            React.createElement('button', {
+              className: 'start-over-link',
+              onClick: handleVoiceStackSwitch,
+              title: 'Switch voice stack (starts a fresh conversation)',
+            }, `voice: ${VOICE_STACK}`),
             ' · ',
             React.createElement('button', {
               className: 'start-over-link',
