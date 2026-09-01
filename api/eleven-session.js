@@ -73,6 +73,10 @@ const desiredAgentConfig = (llmUrl, token) => ({
       model_id: 'eleven_flash_v2',
       voice_id: VOICE_ID,
       agent_output_audio_format: OUTPUT_FORMAT,
+      // Pinned explicitly: the per-mint PATCH merges, so any tts field NOT
+      // named here survives a dashboard "publish" forever (a dashboard
+      // speed edit garbled speech mid-greeting until this was asserted).
+      speed: 1.0,
     },
     asr: { user_input_audio_format: INPUT_FORMAT },
     conversation: {
