@@ -101,8 +101,9 @@ the v0.2 voice-stack bake-off, which now ships its first challenger stack
 Import this repo as a **new Vercel project** (own preview URL) with the same
 env keys as the live app: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, optional
 `GROQ_API_KEY` — plus `ELEVENLABS_API_KEY` for the (default) ElevenLabs
-voice stack, and optional `ELEVENLABS_VOICE_ID` to change its voice from
-the coded default. No build step. The ElevenLabs agent needs no manual
+voice stack. The agent's voice is the `VOICE_ID` constant in
+`api/eleven-session.js` (no env override — code is the single source of
+truth). No build step. The ElevenLabs agent needs no manual
 setup: the first session mint creates and configures it via the API, and
 re-points its custom-LLM URL at whatever host served the request.
 
