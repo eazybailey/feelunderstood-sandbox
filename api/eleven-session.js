@@ -23,9 +23,11 @@ export const config = { runtime: 'edge' };
 const XI_ORIGIN = 'https://api.elevenlabs.io';
 const AGENT_NAME = 'feelunderstood-sandbox';
 
-// The coach's voice, chosen by ear for this bake-off. Override with
-// ELEVENLABS_VOICE_ID (env wins over this constant).
-const DEFAULT_VOICE_ID = 'aj0fZfXTBc7E3By4X8L2';
+// The coach's voice, chosen by ear for this bake-off. This constant is
+// the single source of truth — no env override (one silently winning
+// over the code made voice changes look like they didn't take), and the
+// per-mint agent PATCH re-asserts it over any dashboard edit.
+const VOICE_ID = 'jkSXBeN4g5pNelNQ3YWw';
 
 // Raw PCM in both directions: 16kHz mic upload (their ASR native rate) and
 // 24kHz agent audio down, which the client splices onto the same gapless
@@ -69,7 +71,7 @@ const desiredAgentConfig = (llmUrl, token) => ({
       // Agents must use turbo or flash v2" — their create-time validator);
       // flash_v2_5 is the multilingual variant.
       model_id: 'eleven_flash_v2',
-      voice_id: process.env.ELEVENLABS_VOICE_ID || DEFAULT_VOICE_ID,
+      voice_id: VOICE_ID,
       agent_output_audio_format: OUTPUT_FORMAT,
     },
     asr: { user_input_audio_format: INPUT_FORMAT },
