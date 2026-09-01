@@ -154,6 +154,7 @@ export default async function handler(req) {
     let agentId = (list.agents || []).find(a => a.name === AGENT_NAME)?.agent_id || null;
 
     // …create it if missing, else re-assert the desired config.
+    let patchError = null;
     if (!agentId) {
       const createRes = await xi('/v1/convai/agents/create', {
         method: 'POST',
@@ -175,10 +176,27 @@ export default async function handler(req) {
       });
       if (!patchRes.ok) {
         // Config drift is survivable (the last good config still works) —
-        // log it loudly but keep minting the session.
-        console.error('[eleven-session] agent patch failed:', patchRes.status, (await patchRes.text()).slice(0, 500));
+        // keep minting the session, but surface the failure to the client
+        // so a rejected patch can't silently pin stale config (the "voice
+        // never changes" failure mode).
+        patchError = `${patchRes.status} ${(await patchRes.text()).slice(0, 300)}`;
+        console.error('[eleven-session] agent patch failed:', patchError);
       }
     }
+
+    // Ground truth for the client console: what config does the agent
+    // ACTUALLY hold after the ensure? If this doesn't match VOICE_ID, the
+    // patch above is being rejected and patch_error says why.
+    let agentVoiceId = null;
+    let agentTtsModel = null;
+    try {
+      const getRes = await xi(`/v1/convai/agents/${encodeURIComponent(agentId)}`);
+      if (getRes.ok) {
+        const agent = await getRes.json();
+        agentVoiceId = agent?.conversation_config?.tts?.voice_id || null;
+        agentTtsModel = agent?.conversation_config?.tts?.model_id || null;
+      }
+    } catch (e) { /* diagnostics only */ }
 
     const signedRes = await xi(`/v1/convai/conversation/get-signed-url?agent_id=${encodeURIComponent(agentId)}`);
     if (!signedRes.ok) {
@@ -196,6 +214,10 @@ export default async function handler(req) {
       agent_id: agentId,
       input_sample_rate: 16000,
       output_sample_rate: 24000,
+      expected_voice_id: VOICE_ID,
+      agent_voice_id: agentVoiceId,
+      agent_tts_model: agentTtsModel,
+      patch_error: patchError,
     }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },

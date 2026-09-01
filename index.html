@@ -2356,6 +2356,19 @@ GUARDRAILS.
           if (cancelled()) throw new Error('cancelled');
           if (!session || !session.signed_url) throw new Error('mint-failed');
 
+          // Ground truth on every tap: the voice the agent actually holds.
+          // A mismatch + patch_error is the "voice never changes" bug made
+          // visible (the config PATCH being rejected upstream).
+          if (session.agent_voice_id) {
+            if (session.expected_voice_id && session.agent_voice_id !== session.expected_voice_id) {
+              console.error('[eleven] agent voice MISMATCH — holds', session.agent_voice_id,
+                'expected', session.expected_voice_id,
+                session.patch_error ? `— config patch failed: ${session.patch_error}` : '');
+            } else {
+              console.log('[eleven] agent voice:', session.agent_voice_id, `(${session.agent_tts_model || '?'})`);
+            }
+          }
+
           // The mic tap that started this session already ran the global
           // ensureAudioContext listener; without a running context there is
           // neither capture nor playback.
