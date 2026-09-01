@@ -23,11 +23,14 @@ export const config = { runtime: 'edge' };
 const XI_ORIGIN = 'https://api.elevenlabs.io';
 const AGENT_NAME = 'feelunderstood-sandbox';
 
-// The coach's voice, chosen by ear for this bake-off. This constant is
-// the single source of truth — no env override (one silently winning
-// over the code made voice changes look like they didn't take), and the
-// per-mint agent PATCH re-asserts it over any dashboard edit.
-const VOICE_ID = 'jkSXBeN4g5pNelNQ3YWw';
+// The VOICE and other TTS settings (model, stability, speed, …) are OWNED
+// BY THE ELEVENLABS DASHBOARD — tune them there and they take effect on
+// the next session, no deploy needed. This constant only seeds the very
+// first create of the agent; after that the per-mint patch echoes the
+// agent's current tts block back instead of overwriting it. Everything
+// else (custom-LLM URL, auth, client events) stays code-owned because it
+// must track deployments.
+const BOOTSTRAP_VOICE_ID = 'jkSXBeN4g5pNelNQ3YWw';
 
 // Raw PCM in both directions: 16kHz mic upload (their ASR native rate) and
 // 24kHz agent audio down, which the client splices onto the same gapless
@@ -45,7 +48,10 @@ const proxyToken = async () => {
   return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
 };
 
-const desiredAgentConfig = (llmUrl, token) => ({
+// currentTts: the agent's existing tts block (from a GET), echoed back so
+// dashboard voice edits survive the patch under either merge-or-replace
+// PATCH semantics; null (first create) seeds the bootstrap defaults.
+const desiredAgentConfig = (llmUrl, token, currentTts) => ({
   conversation_config: {
     agent: {
       language: 'en',
@@ -66,12 +72,13 @@ const desiredAgentConfig = (llmUrl, token) => ({
         },
       },
     },
-    tts: {
-      // English-only agents must use the v2 English models ("English
-      // Agents must use turbo or flash v2" — their create-time validator);
-      // flash_v2_5 is the multilingual variant.
+    tts: currentTts || {
+      // Bootstrap defaults for the FIRST create only — dashboard-owned
+      // from then on. English-only agents must use the v2 English models
+      // ("English Agents must use turbo or flash v2" — their create-time
+      // validator); flash_v2_5 is the multilingual variant.
       model_id: 'eleven_flash_v2',
-      voice_id: VOICE_ID,
+      voice_id: BOOTSTRAP_VOICE_ID,
       agent_output_audio_format: OUTPUT_FORMAT,
     },
     asr: { user_input_audio_format: INPUT_FORMAT },
@@ -137,7 +144,7 @@ export default async function handler(req) {
       });
     }
     const llmUrl = `https://${host}/api/eleven-llm`;
-    const agentConfig = desiredAgentConfig(llmUrl, await proxyToken());
+    const token = await proxyToken();
 
     // Find the agent by name… (a failed list must NOT fall through to
     // create — that would mint a duplicate agent on every blip)
@@ -153,12 +160,19 @@ export default async function handler(req) {
     const list = await listRes.json();
     let agentId = (list.agents || []).find(a => a.name === AGENT_NAME)?.agent_id || null;
 
-    // …create it if missing, else re-assert the desired config.
+    // …create it if missing, else re-assert the code-owned wiring while
+    // PRESERVING the dashboard-owned tts block (voice, model, stability…).
     let patchError = null;
+    let agentVoiceId = null;
+    let agentTtsModel = null;
     if (!agentId) {
       const createRes = await xi('/v1/convai/agents/create', {
         method: 'POST',
-        body: JSON.stringify({ name: AGENT_NAME, tags: ['feelunderstood-sandbox'], ...agentConfig }),
+        body: JSON.stringify({
+          name: AGENT_NAME,
+          tags: ['feelunderstood-sandbox'],
+          ...desiredAgentConfig(llmUrl, token, null),
+        }),
       });
       if (!createRes.ok) {
         const detail = (await createRes.text()).slice(0, 300);
@@ -169,34 +183,41 @@ export default async function handler(req) {
         });
       }
       agentId = (await createRes.json()).agent_id;
+      agentVoiceId = BOOTSTRAP_VOICE_ID;
+      agentTtsModel = 'eleven_flash_v2';
     } else {
+      // Read the agent's live tts block first and echo it back through the
+      // patch, so a voice tuned in the dashboard survives regardless of
+      // whether their PATCH merges or replaces nested config.
+      let currentTts = null;
+      try {
+        const getRes = await xi(`/v1/convai/agents/${encodeURIComponent(agentId)}`);
+        if (getRes.ok) {
+          const agent = await getRes.json();
+          currentTts = agent?.conversation_config?.tts || null;
+          agentVoiceId = currentTts?.voice_id || null;
+          agentTtsModel = currentTts?.model_id || null;
+        }
+      } catch (e) { /* fall through — patch without tts below */ }
+
+      const patchConfig = desiredAgentConfig(llmUrl, token, currentTts);
+      if (!currentTts) {
+        // Couldn't read the live tts — leave it out of the patch entirely
+        // rather than risk stomping a dashboard voice with the bootstrap.
+        delete patchConfig.conversation_config.tts;
+      }
       const patchRes = await xi(`/v1/convai/agents/${agentId}`, {
         method: 'PATCH',
-        body: JSON.stringify(agentConfig),
+        body: JSON.stringify(patchConfig),
       });
       if (!patchRes.ok) {
         // Config drift is survivable (the last good config still works) —
         // keep minting the session, but surface the failure to the client
-        // so a rejected patch can't silently pin stale config (the "voice
-        // never changes" failure mode).
+        // so a rejected patch can't silently pin stale wiring.
         patchError = `${patchRes.status} ${(await patchRes.text()).slice(0, 300)}`;
         console.error('[eleven-session] agent patch failed:', patchError);
       }
     }
-
-    // Ground truth for the client console: what config does the agent
-    // ACTUALLY hold after the ensure? If this doesn't match VOICE_ID, the
-    // patch above is being rejected and patch_error says why.
-    let agentVoiceId = null;
-    let agentTtsModel = null;
-    try {
-      const getRes = await xi(`/v1/convai/agents/${encodeURIComponent(agentId)}`);
-      if (getRes.ok) {
-        const agent = await getRes.json();
-        agentVoiceId = agent?.conversation_config?.tts?.voice_id || null;
-        agentTtsModel = agent?.conversation_config?.tts?.model_id || null;
-      }
-    } catch (e) { /* diagnostics only */ }
 
     const signedRes = await xi(`/v1/convai/conversation/get-signed-url?agent_id=${encodeURIComponent(agentId)}`);
     if (!signedRes.ok) {
@@ -214,7 +235,6 @@ export default async function handler(req) {
       agent_id: agentId,
       input_sample_rate: 16000,
       output_sample_rate: 24000,
-      expected_voice_id: VOICE_ID,
       agent_voice_id: agentVoiceId,
       agent_tts_model: agentTtsModel,
       patch_error: patchError,

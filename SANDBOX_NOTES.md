@@ -66,8 +66,9 @@ the choice (`fu_voice_stack`) — same two-links pattern as `?v=`.
   params, variant prompt, prompt caching — check Vercel logs for
   `[eleven-llm] usage:`), so the stacks differ only in ears and mouth.
   `/api/eleven-session` creates/updates the agent programmatically (named
-  `feelunderstood-sandbox` in the ElevenLabs workspace — don't hand-edit
-  it) and mints the signed WebSocket URL. Known deltas on this stack: the
+  `feelunderstood-sandbox` in the ElevenLabs workspace; its voice/TTS
+  settings are yours to tune in the dashboard, the rest is re-asserted
+  from code) and mints the signed WebSocket URL. Known deltas on this stack: the
   `[[VISUAL]]` channel is stripped before TTS and not rendered (no
   VisualAid cards), and the greeting is spoken by the agent on the first
   mic tap rather than on arrival.
@@ -101,9 +102,11 @@ the v0.2 voice-stack bake-off, which now ships its first challenger stack
 Import this repo as a **new Vercel project** (own preview URL) with the same
 env keys as the live app: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, optional
 `GROQ_API_KEY` — plus `ELEVENLABS_API_KEY` for the (default) ElevenLabs
-voice stack. The agent's voice is the `VOICE_ID` constant in
-`api/eleven-session.js` (no env override — code is the single source of
-truth). No build step. The ElevenLabs agent needs no manual
+voice stack. The agent's voice and TTS settings are tuned in the
+ElevenLabs dashboard (Agents → `feelunderstood-sandbox`) and take effect
+on the next session; the code only seeds a default on first create and
+re-asserts the wiring (custom-LLM URL, auth, events) on every session.
+No build step. The ElevenLabs agent needs no manual
 setup: the first session mint creates and configures it via the API, and
 re-points its custom-LLM URL at whatever host served the request.
 

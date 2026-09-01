@@ -187,9 +187,11 @@ OPENAI_API_KEY=sk-...          # Required for the current stack — TTS, Realtim
 GROQ_API_KEY=gsk_...           # Optional — STT fallback only
 ```
 
-The agent's voice is the `VOICE_ID` constant in `api/eleven-session.js` —
-deliberately not an env var (a forgotten override made voice changes look
-like they didn't take).
+The agent's **voice and TTS settings are owned by the ElevenLabs
+dashboard** — tune them there (Agents → `feelunderstood-sandbox`), they
+take effect on the next session with no deploy. `BOOTSTRAP_VOICE_ID` in
+`api/eleven-session.js` only seeds the first create; the per-mint patch
+reads the live tts block and echoes it back rather than overwriting it.
 
 ## Development Notes
 
@@ -204,6 +206,8 @@ like they didn't take).
   the control via `?vs=current`. The A/B prompt toggle sits behind the proxy,
   so prompts × voice stacks cross-combine without either knowing about the
   other. Hume (EVI, same custom-LLM pattern) is still to come.
-- The ElevenLabs agent is created/updated programmatically by
-  `api/eleven-session.js` — don't hand-edit it in the ElevenLabs dashboard;
-  the next session mint re-asserts the coded config.
+- The ElevenLabs agent is split-ownership: **voice/TTS settings belong to
+  the dashboard** (edit freely; preserved by every mint), while the wiring
+  — custom-LLM URL, auth, client events, ASR format — is re-asserted from
+  `api/eleven-session.js` on every mint, so don't hand-edit those parts in
+  the dashboard; they'll be overwritten.
