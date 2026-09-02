@@ -51,8 +51,8 @@ const VOICE_ID = 'ImnfuV8oxhB7ya99oJfc';
 const VOICE_SPEED = 1.0;
 
 // Raw PCM in both directions: 16kHz mic upload (their ASR native rate) and
-// 24kHz agent audio down, which the client splices onto the same gapless
-// AudioContext timeline the control stack already uses.
+// 24kHz agent audio down, which the client splices gaplessly onto its
+// AudioContext timeline.
 const INPUT_FORMAT = 'pcm_16000';
 const OUTPUT_FORMAT = 'pcm_24000';
 

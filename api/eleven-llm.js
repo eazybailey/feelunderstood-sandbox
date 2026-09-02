@@ -8,7 +8,7 @@ export const config = { runtime: 'edge' };
 // SSE stream back. We translate to the Anthropic API and stream Claude's
 // reply through, so the conversational brain — model, variant system
 // prompt, prompt caching, max_tokens clamp — is EXACTLY the same as the
-// control stack's /api/chat-stream. Only the ears and mouth change.
+// typed-fallback path's /api/chat-stream. Only the ears and mouth differ.
 //
 // The A/B Source of Truth rides in `custom_llm_extra_body`, set by the
 // client at session start and attached by ElevenLabs to every LLM call:
@@ -122,8 +122,9 @@ export default async function handler(req) {
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify({
-        // Mirror /api/chat-stream exactly — the bake-off must not change
-        // the brain between stacks (model, effort, clamp, caching).
+        // Mirror /api/chat-stream exactly — the brain (model, effort,
+        // clamp, caching) must not differ between the agent path and the
+        // typed fallback.
         model: 'claude-sonnet-4-6',
         max_tokens: Math.min(Number(extra.fu_max_tokens) || 700, 1000),
         stream: true,

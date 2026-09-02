@@ -15,10 +15,9 @@ reduced to the single Helpline path needed to compare Source-of-Truth prompts.
 | Layer | Technology |
 |-------|-----------|
 | Frontend | React 18.3.1 (vendored UMD builds in `/vendor` — no CDN, no build step; app code is plain `React.createElement`, no JSX/Babel) |
-| Backend | Vercel Functions — Edge Runtime (`chat-stream`, `tts`, `stt`, `realtime-session`, `eleven-session`, `eleven-llm`) |
-| AI | Anthropic Claude API (claude-sonnet-4-6), prompt caching on the system block — same model/params on both voice stacks |
-| Voice (default: `elevenlabs`) | ElevenLabs Agents platform over one WebSocket (their ASR + turn-taking + barge-in + TTS, `eleven_flash_v2`, PCM 16k up / 24k down), custom LLM pointed at `/api/eleven-llm` |
-| Voice (control: `current`) | TTS: OpenAI (`tts-1`, `shimmer`) streamed as raw PCM, MP3 fallback. STT primary: OpenAI Realtime over WebRTC (`gpt-4o-mini-transcribe`, server VAD, hands-free); fallbacks: native Web Speech API, then MediaRecorder → `/api/stt` (Groq `whisper-large-v3-turbo` when only `GROQ_API_KEY` is set) |
+| Backend | Vercel Functions — Edge Runtime (`chat-stream`, `eleven-session`, `eleven-llm`) |
+| AI | Anthropic Claude API (claude-sonnet-4-6), prompt caching on the system block — same model/params behind the agent and the text fallback |
+| Voice | ElevenLabs Agents platform over one WebSocket (their ASR + turn-taking + barge-in + TTS, `eleven_flash_v2`, PCM 16k up / 24k down), custom LLM pointed at `/api/eleven-llm`. The only voice pipeline — the earlier OpenAI control stack has been removed |
 | Hosting | Vercel |
 | Styling | Vanilla CSS (light theme only) |
 
@@ -27,15 +26,13 @@ reduced to the single Helpline path needed to compare Source-of-Truth prompts.
 ```
 feelunderstood-sandbox/
 ├── api/                       # Vercel serverless endpoints (all Edge Runtime)
-│   ├── chat-stream.js        # Streaming Claude API; relays array-form system
-│   │                         #   prompt unchanged; logs cache usage per turn
-│   ├── realtime-session.js   # Mints ephemeral OpenAI Realtime client secrets
+│   ├── chat-stream.js        # Streaming Claude API for the typed no-session
+│   │                         #   fallback; relays array-form system prompt
+│   │                         #   unchanged; logs cache usage per turn
 │   ├── eleven-session.js     # Ensures/configures the ElevenLabs agent and
 │   │                         #   mints a signed conversation WebSocket URL
-│   ├── eleven-llm.js         # OpenAI-compatible custom-LLM endpoint the
-│   │                         #   ElevenLabs agent calls; relays to Claude
-│   ├── tts.js                # OpenAI TTS — PCM streaming or MP3
-│   └── stt.js                # Audio transcription (OpenAI; Groq fallback)
+│   └── eleven-llm.js         # OpenAI-compatible custom-LLM endpoint the
+│                             #   ElevenLabs agent calls; relays to Claude
 ├── vendor/                    # Vendored, pinned React 18.3.1 UMD builds
 ├── images/                    # favicon-64.png, icon-avatar.svg — nothing else
 ├── docs/
@@ -86,18 +83,17 @@ conversations for hand-off between testers.
   `cache_creation_input_tokens` / `cache_read_input_tokens` per turn — turn 1
   creation, turn 2+ reads > 0 is the proof it works.
 
-## Voice Stacks (v0.2 bake-off)
+## Voice Stack
 
-Two stacks, selected by `VOICE_STACK` in `index.html` (default
-`elevenlabs`): persisted in `localStorage` (`fu_voice_stack`), forced via
-`?vs=elevenlabs` / `?vs=current` (also `?vs=e` / `?vs=c`), and switchable
-from the small `voice: <stack>` footer link (always a fresh conversation +
-page reload — stacks never mix within one transcript, and a saved
-conversation stamped with the other stack is never resumed). Both stacks
-share the identical brain: same model, params, variant system prompt and
-prompt caching — only the ears and mouth differ.
+There is one voice pipeline: the ElevenLabs Agents stack. `VOICE_STACK`
+in `index.html` is a fixed `'elevenlabs'` stamp on transcripts (a saved
+conversation stamped by the retired OpenAI stack is never resumed). The
+earlier v0.2 bake-off's OpenAI control stack (`current`: Realtime STT →
+`/api/chat-stream` → OpenAI TTS, with Web Speech / MediaRecorder
+fallbacks) and its endpoints (`tts`, `stt`, `realtime-session`) have been
+removed, along with the footer switch and the `?vs=` param.
 
-### `elevenlabs` (default)
+### How a session runs
 
 ```
 User taps mic ONCE → POST /api/eleven-session
@@ -122,48 +118,33 @@ User taps mic ONCE → POST /api/eleven-session
 
 The agent speaks the on-screen greeting itself on the first tap
 (`first_message` override); typed messages go into a live session as
-`user_message` events, or fall back to `/api/chat-stream` with TTS
-suppressed when no session is open (so no OpenAI voice pollutes the stack).
+`user_message` events, or — when no session is open — fall back to a
+text-only turn through `/api/chat-stream` (nothing is spoken; the turn
+reaches the agent on the next session via `fu_history`).
 
-### `current` (control condition — unchanged from the live app)
-
-```
-User taps mic ONCE → continuous hands-free session
-  → WebRTC direct to OpenAI Realtime (ephemeral secret from /api/realtime-session)
-  → server VAD ends the turn after ~1.2s silence
-  → POST /api/chat-stream (SSE, unbuffered)
-  → sentence buffer fires TTS at natural breaks (first chunk ~28 chars)
-  → POST /api/tts format:'pcm' — 24kHz PCM spliced gaplessly onto the
-    AudioContext timeline; barge-in cancels playback + stream
-  → back to LISTENING
-```
-
-Fallbacks: native `SpeechRecognition` tap-to-talk, then MediaRecorder →
-`/api/stt`. Self-healing hands-free session (reconnect budget, visibility
-rebuild, mic-track death detection, 8-min proactive rotation) — the same
-lifecycle drives the ElevenLabs stack via `openSessionRef`. A header
-toggle (`fu_voice_muted`) turns voice replies off entirely. See the inline
-comments in `index.html` for the reliability knobs — they are all deliberate.
+The hands-free session self-heals (reconnect budget with backoff,
+visibility rebuild, mic-track death detection). A header toggle
+(`fu_voice_muted`) drops the agent's audio so replies land as text only.
+See the inline comments in `index.html` for the reliability knobs — they
+are all deliberate.
 
 ### Two-Channel Replies (spoken vs shown)
 
-Assistant replies split on a literal `[[VISUAL]]` marker: prose before it is
-spoken via TTS; markdown after it renders silently as a `VisualAid` card.
-The streaming client holds back partial markers (`[[VIS` is never voiced),
-stores messages as `{ content, visual }`, and reassembles
-`content + [[VISUAL]] + visual` when sending history back to Claude.
-`sanitizeForSpeech` strips residual markdown before TTS.
+Claude's replies split on a literal `[[VISUAL]]` marker: prose before it is
+the spoken channel; markdown after it is a `VisualAid` card. On the agent
+path `/api/eleven-llm` strips the visual channel so it is never spoken (no
+cards). The text fallback renders it: the streaming client holds back
+partial markers (`[[VIS` never flashes as text), stores messages as
+`{ content, visual }`, and reassembles `content + [[VISUAL]] + visual`
+when sending history back to Claude.
 
 ## API Endpoints
 
 | Endpoint | Purpose |
 |----------|---------|
-| `POST /api/chat-stream` | Streams Claude as simplified SSE (`data: {text}`, `data: [DONE]`); clamps `max_tokens` to 1000; logs cache usage |
-| `POST /api/realtime-session` | Mints 10-min OpenAI Realtime client secret (server VAD, 1.2s end-of-turn) |
+| `POST /api/chat-stream` | Streams Claude as simplified SSE (`data: {text}`, `data: [DONE]`) for the typed no-session fallback; clamps `max_tokens` to 1000; logs cache usage |
 | `POST /api/eleven-session` | Ensures + configures this deployment's ElevenLabs agent (one per production / preview branch, idempotent by name; always re-patched so the custom-LLM URL tracks the deployment host), mints a signed conversation WebSocket URL |
 | `POST /api/eleven-llm` | OpenAI-compatible `/chat/completions` for the ElevenLabs agent (rewrite maps `/api/eleven-llm/chat/completions` here); auth via `x-fu-proxy-token`, an SHA-256 derivation of `ELEVENLABS_API_KEY` set on the agent config; relays to Claude with the same params + caching as chat-stream and logs usage as `[eleven-llm]` |
-| `POST /api/tts` | Text → audio: raw PCM stream (primary) or MP3; 8s upstream timeout → clean 504 |
-| `POST /api/stt` | Transcribes uploaded audio; OpenAI when `OPENAI_API_KEY` is set, else Groq |
 
 All endpoints are same-origin only (no CORS headers — deliberate), except
 `/api/eleven-llm`, which is called server-to-server by ElevenLabs and gated
@@ -174,8 +155,7 @@ by the shared-secret header instead.
 React `useState`/`useRef` only. localStorage keys: `fu_conversations` (capped
 at 50, each stamped with `variant`, `variantName`, `sandboxVersion`,
 `voiceStack`), `fu_active_conversation`, `fu_profile` (`{ name }`),
-`fu_voice_muted`, `fu_sot_variant`, `fu_voice_stack`. Greeting-only
-conversations are never
+`fu_voice_muted`, `fu_sot_variant`. Greeting-only conversations are never
 persisted. There is no history UI — transcripts are read from localStorage
 via DevTools when needed.
 
@@ -183,9 +163,7 @@ via DevTools when needed.
 
 ```
 ANTHROPIC_API_KEY=sk-ant-...   # Required — Claude (chat-stream, eleven-llm)
-ELEVENLABS_API_KEY=...         # Required for the elevenlabs stack (default)
-OPENAI_API_KEY=sk-...          # Required for the current stack — TTS, Realtime STT, upload STT
-GROQ_API_KEY=gsk_...           # Optional — STT fallback only
+ELEVENLABS_API_KEY=...         # Required — the voice stack
 VERCEL_AUTOMATION_BYPASS_SECRET=...   # Injected by Vercel when "Protection Bypass
                                #   for Automation" is on — lets ElevenLabs reach
                                #   /api/eleven-llm on protected preview deployments
@@ -203,11 +181,11 @@ like they didn't take).
 - **Do not** reintroduce per-turn-dynamic content into the system prompt
   builders (timestamps, counters) — it would kill every prompt-cache hit and
   contaminate the A/B latency comparison.
-- v0.2 status: the ElevenLabs stack ships (Agents platform + `/api/eleven-llm`
-  custom-LLM proxy, per the brief §3) and is the default; `current` remains
-  the control via `?vs=current`. The A/B prompt toggle sits behind the proxy,
-  so prompts × voice stacks cross-combine without either knowing about the
-  other. Hume (EVI, same custom-LLM pattern) is still to come.
+- v0.2 status: the ElevenLabs stack (Agents platform + `/api/eleven-llm`
+  custom-LLM proxy, per the brief §3) is the only voice stack; the OpenAI
+  control stack was removed after the bake-off. The A/B prompt toggle sits
+  behind the proxy, so it knows nothing about the voice layer. Hume (EVI,
+  same custom-LLM pattern) is still to come.
 - The ElevenLabs agents are created/updated programmatically by
   `api/eleven-session.js` — don't hand-edit them in the ElevenLabs
   dashboard; the next session mint re-asserts the coded config (the PATCH

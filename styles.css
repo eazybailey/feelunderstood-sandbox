@@ -329,18 +329,6 @@ html, body {
   font-style: italic;
 }
 
-/* Transcribing bubble: user-side, dots-only, signals "your message is
-   being processed". Reuses .typing-dot keyframes. */
-.transcribing-bubble {
-  display: flex;
-  gap: 5px;
-  padding: 14px 18px;
-  font-style: normal;
-}
-.transcribing-bubble .typing-dot {
-  background: var(--accent-ink);
-}
-
 /* Typing dots */
 .typing-bubble {
   display: flex;
