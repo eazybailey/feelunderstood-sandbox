@@ -40,7 +40,7 @@ const agentNameFor = (host) => {
 // the single source of truth — no env override (one silently winning
 // over the code made voice changes look like they didn't take), and the
 // per-mint agent PATCH re-asserts it over any dashboard edit.
-const VOICE_ID = 'gWPvScXeOFRAvyXvl9gh';
+const VOICE_ID = 'ImnfuV8oxhB7ya99oJfc';
 
 // Speaking rate, 0.7 (slowest) – 1.2 (fastest); 1.0 is the voice's natural
 // pace. Pinned here for the same reason as VOICE_ID: the per-mint PATCH
