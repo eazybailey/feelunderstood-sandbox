@@ -101,10 +101,11 @@ prompt caching — only the ears and mouth differ.
 
 ```
 User taps mic ONCE → POST /api/eleven-session
-  (finds-or-creates the "feelunderstood-sandbox" agent, re-asserts its
-   config — custom-LLM URL derived from the request host — and mints a
-   signed WebSocket URL; agent auth is enabled so the signed URL is the
-   only way in)
+  (finds-or-creates this deployment's agent — "feelunderstood-sandbox"
+   on production, "feelunderstood-sandbox [preview: <branch>]" on a
+   preview — re-asserts its config — custom-LLM URL derived from the
+   request host — and mints a signed WebSocket URL; agent auth is enabled
+   so the signed URL is the only way in)
   → browser opens wss to ElevenLabs (raw protocol, no SDK), sends the
     variant prompt + prior history via conversation overrides /
     custom_llm_extra_body; mic PCM16@16k streams up via ScriptProcessor
@@ -159,7 +160,7 @@ stores messages as `{ content, visual }`, and reassembles
 |----------|---------|
 | `POST /api/chat-stream` | Streams Claude as simplified SSE (`data: {text}`, `data: [DONE]`); clamps `max_tokens` to 1000; logs cache usage |
 | `POST /api/realtime-session` | Mints 10-min OpenAI Realtime client secret (server VAD, 1.2s end-of-turn) |
-| `POST /api/eleven-session` | Ensures + configures the ElevenLabs agent (idempotent by name; always re-patched so the custom-LLM URL tracks the deployment host), mints a signed conversation WebSocket URL |
+| `POST /api/eleven-session` | Ensures + configures this deployment's ElevenLabs agent (one per production / preview branch, idempotent by name; always re-patched so the custom-LLM URL tracks the deployment host), mints a signed conversation WebSocket URL |
 | `POST /api/eleven-llm` | OpenAI-compatible `/chat/completions` for the ElevenLabs agent (rewrite maps `/api/eleven-llm/chat/completions` here); auth via `x-fu-proxy-token`, an SHA-256 derivation of `ELEVENLABS_API_KEY` set on the agent config; relays to Claude with the same params + caching as chat-stream and logs usage as `[eleven-llm]` |
 | `POST /api/tts` | Text → audio: raw PCM stream (primary) or MP3; 8s upstream timeout → clean 504 |
 | `POST /api/stt` | Transcribes uploaded audio; OpenAI when `OPENAI_API_KEY` is set, else Groq |
@@ -185,6 +186,9 @@ ANTHROPIC_API_KEY=sk-ant-...   # Required — Claude (chat-stream, eleven-llm)
 ELEVENLABS_API_KEY=...         # Required for the elevenlabs stack (default)
 OPENAI_API_KEY=sk-...          # Required for the current stack — TTS, Realtime STT, upload STT
 GROQ_API_KEY=gsk_...           # Optional — STT fallback only
+VERCEL_AUTOMATION_BYPASS_SECRET=...   # Injected by Vercel when "Protection Bypass
+                               #   for Automation" is on — lets ElevenLabs reach
+                               #   /api/eleven-llm on protected preview deployments
 ```
 
 The agent's voice is the `VOICE_ID` constant in `api/eleven-session.js` —
@@ -204,6 +208,13 @@ like they didn't take).
   the control via `?vs=current`. The A/B prompt toggle sits behind the proxy,
   so prompts × voice stacks cross-combine without either knowing about the
   other. Hume (EVI, same custom-LLM pattern) is still to come.
-- The ElevenLabs agent is created/updated programmatically by
-  `api/eleven-session.js` — don't hand-edit it in the ElevenLabs dashboard;
-  the next session mint re-asserts the coded config.
+- The ElevenLabs agents are created/updated programmatically by
+  `api/eleven-session.js` — don't hand-edit them in the ElevenLabs
+  dashboard; the next session mint re-asserts the coded config (the PATCH
+  merges, so every tts field the code cares about — voice, speed — must be
+  named there to hold). Production and each preview branch get their own
+  agent, so testing a preview never re-points production's brain.
+- Preview deployments are behind Vercel Deployment Protection, which
+  ElevenLabs' servers can't pass; enable "Protection Bypass for
+  Automation" in the Vercel project settings and the session mint adds the
+  bypass header to the agent's custom-LLM callback automatically.

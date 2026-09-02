@@ -66,8 +66,9 @@ the choice (`fu_voice_stack`) — same two-links pattern as `?v=`.
   params, variant prompt, prompt caching — check Vercel logs for
   `[eleven-llm] usage:`), so the stacks differ only in ears and mouth.
   `/api/eleven-session` creates/updates the agent programmatically (named
-  `feelunderstood-sandbox` in the ElevenLabs workspace — don't hand-edit
-  it) and mints the signed WebSocket URL. Known deltas on this stack: the
+  `feelunderstood-sandbox` in the ElevenLabs workspace, plus one
+  `feelunderstood-sandbox [preview: <branch>]` per preview branch — don't
+  hand-edit them) and mints the signed WebSocket URL. Known deltas on this stack: the
   `[[VISUAL]]` channel is stripped before TTS and not rendered (no
   VisualAid cards), and the greeting is spoken by the agent on the first
   mic tap rather than on arrival.
