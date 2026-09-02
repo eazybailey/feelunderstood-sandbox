@@ -12,9 +12,10 @@ nothing else. Everything outside that path has been deleted from the codebase
 
 1. **Landing Gate** — "Sandbox — testing two versions of the coach." → Start.
 2. **Name screen** — first name only. No questionnaire.
-3. **Helpline chat** — the full voice pipeline (hands-free realtime STT,
-   streamed gapless TTS, barge-in, tap-to-talk/text fallbacks) plus the
-   `[[VISUAL]]` two-channel replies. Header: voice-replies toggle, New Chat.
+3. **Helpline chat** — hands-free voice on the ElevenLabs Agents stack
+   (one tap opens a continuous session: their ASR, turn-taking, barge-in
+   and TTS; the LLM behind the agent is our Claude proxy), with typing as
+   the fallback. Header: voice-replies toggle, New Chat.
    Footer: version label + a small `start over` link that wipes the device
    (profile + conversations) for hand-off to the next tester.
 
@@ -51,33 +52,29 @@ Light never pays. `api/chat-stream.js` relays the array unchanged and logs the
 (`cache_creation_input_tokens` / `cache_read_input_tokens` — turn 1 should
 show creation, turn 2+ reads > 0). Check the Vercel function logs to verify.
 
-## The voice-stack toggle (v0.2)
+## The voice stack (v0.2)
 
-Two interchangeable voice stacks, cross-combining with the A/B prompt
-toggle (2 prompts × 2 stacks). Selected once per page load; the small
-`voice: <stack>` footer link switches (fresh conversation + reload), and
-`?vs=elevenlabs` / `?vs=current` (or `?vs=e` / `?vs=c`) forces and persists
-the choice (`fu_voice_stack`) — same two-links pattern as `?v=`.
+One voice stack, the ElevenLabs Agents platform over one WebSocket: their
+ASR, end-of-turn detection, barge-in and TTS. The agent's LLM is a
+*custom LLM* pointed at our `/api/eleven-llm` proxy, which makes the
+identical Claude call as `/api/chat-stream` (same model, params, variant
+prompt, prompt caching — check Vercel logs for `[eleven-llm] usage:`), so
+the A/B prompt toggle sits behind it unchanged. `/api/eleven-session`
+creates/updates the agent programmatically (named `feelunderstood-sandbox`
+in the ElevenLabs workspace, plus one `feelunderstood-sandbox [preview:
+<branch>]` per preview branch — don't hand-edit them) and mints the signed
+WebSocket URL. The `[[VISUAL]]` channel is stripped before TTS and not
+rendered on this path (no VisualAid cards), and the greeting is spoken by
+the agent on the first mic tap rather than on arrival. A typed message
+with no session open goes through `/api/chat-stream` as a text-only turn
+(nothing spoken) and reaches the agent on the next session.
 
-- **`elevenlabs` (default)** — ElevenLabs Agents platform over one
-  WebSocket: their ASR, end-of-turn detection, barge-in and TTS. The
-  agent's LLM is a *custom LLM* pointed at our `/api/eleven-llm` proxy,
-  which makes the identical Claude call as `/api/chat-stream` (same model,
-  params, variant prompt, prompt caching — check Vercel logs for
-  `[eleven-llm] usage:`), so the stacks differ only in ears and mouth.
-  `/api/eleven-session` creates/updates the agent programmatically (named
-  `feelunderstood-sandbox` in the ElevenLabs workspace, plus one
-  `feelunderstood-sandbox [preview: <branch>]` per preview branch — don't
-  hand-edit them) and mints the signed WebSocket URL. Known deltas on this stack: the
-  `[[VISUAL]]` channel is stripped before TTS and not rendered (no
-  VisualAid cards), and the greeting is spoken by the agent on the first
-  mic tap rather than on arrival.
-- **`current` (control)** — the live app's pipeline, untouched: OpenAI
-  Realtime hands-free STT → `/api/chat-stream` → OpenAI TTS.
-
-Conversations are stamped with the active stack in `voiceStack`, and a
-saved conversation is never resumed under a different stack (same clean-
-test rule as the prompt variant).
+The bake-off's control stack — the live app's OpenAI pipeline (`current`:
+Realtime hands-free STT → `/api/chat-stream` → OpenAI TTS, with the Web
+Speech / MediaRecorder fallbacks) — has been removed from this build,
+along with the footer switch, the `?vs=` param and `fu_voice_stack`.
+Conversations are still stamped `voiceStack: 'elevenlabs'`, and a saved
+conversation stamped by the old stack is never resumed.
 
 ## Transcripts
 
@@ -92,21 +89,22 @@ device if a transcript is needed.
 The questionnaire flow, Lessons path, Facilitator mode, Basecamp, About &
 Insights, the history drawer, dark mode, the dev panel, the service worker and
 all PWA scaffolding (manifest, icons), the icon/version scripts, and the
-legacy docs (`plan.md`, `docs/SYSTEM_PROMPTS.md`). The original voice
-pipeline was left untouched — it is the control condition (`current`) for
-the v0.2 voice-stack bake-off, which now ships its first challenger stack
-(`elevenlabs`, the default — see "The voice-stack toggle" above).
+legacy docs (`plan.md`, `docs/SYSTEM_PROMPTS.md`). The original OpenAI
+voice pipeline served as the control condition for the v0.2 voice-stack
+bake-off and was removed once the ElevenLabs stack won (see "The voice
+stack" above): `api/tts.js`, `api/stt.js`, `api/realtime-session.js` and
+the client-side STT/TTS hooks are gone.
 
 ## Deploying
 
-Import this repo as a **new Vercel project** (own preview URL) with the same
-env keys as the live app: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, optional
-`GROQ_API_KEY` — plus `ELEVENLABS_API_KEY` for the (default) ElevenLabs
-voice stack. The agent's voice is the `VOICE_ID` constant in
-`api/eleven-session.js` (no env override — code is the single source of
-truth). No build step. The ElevenLabs agent needs no manual
-setup: the first session mint creates and configures it via the API, and
-re-points its custom-LLM URL at whatever host served the request.
+Import this repo as a **new Vercel project** (own preview URL) with two
+env keys: `ANTHROPIC_API_KEY` and `ELEVENLABS_API_KEY` (`OPENAI_API_KEY` /
+`GROQ_API_KEY` are no longer used). The agent's voice and speaking rate are
+the `VOICE_ID` / `VOICE_SPEED` constants in `api/eleven-session.js` (no
+env override — code is the single source of truth). No build step. The
+ElevenLabs agent needs no manual setup: the first session mint creates and
+configures it via the API, and re-points its custom-LLM URL at whatever
+host served the request.
 
 ## Versioning note
 
