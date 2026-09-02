@@ -10,24 +10,45 @@ export const config = { runtime: 'edge' };
 // cross-combine without either knowing about the other (build brief §3).
 //
 // This endpoint (same-origin only, like the others — no CORS headers):
-//   1. Finds-or-creates the agent by name, then PATCHes its config on every
-//      call. Always-patch is deliberate self-healing: the custom-LLM URL is
-//      derived from *this request's* host, so preview and production
-//      deployments each repoint the agent at themselves, and config drift
-//      after a code change fixes itself on the next session.
+//   1. Finds-or-creates this deployment's agent by name, then PATCHes its
+//      config on every call. Always-patch is deliberate self-healing: the
+//      custom-LLM URL is derived from *this request's* host, so a fresh
+//      preview URL repoints its own agent at itself, and config drift after
+//      a code change (or a dashboard edit) fixes itself on the next session.
 //   2. Mints a signed WebSocket URL the browser connects to directly.
 //
 // The agent requires auth (enable_auth) so a leaked agent_id alone can't
 // start conversations on our ElevenLabs quota; only this endpoint can.
 
 const XI_ORIGIN = 'https://api.elevenlabs.io';
-const AGENT_NAME = 'feelunderstood-sandbox';
+const AGENT_BASE_NAME = 'feelunderstood-sandbox';
+
+// One agent per deployment, not one shared agent. The agent's custom-LLM
+// URL is re-pointed at whichever host minted the last session, so with a
+// single agent a mic tap on a preview deployment silently hijacked
+// production's brain (and vice versa) until the other side tapped again.
+// Production keeps the original bare name (its existing agent carries on);
+// each preview branch gets its own, named after the branch. Agents cost
+// nothing, and every one is (re)configured by the same code path.
+const agentNameFor = (host) => {
+  if (process.env.VERCEL_ENV === 'production') return AGENT_BASE_NAME;
+  const ref = process.env.VERCEL_GIT_COMMIT_REF || host;
+  return `${AGENT_BASE_NAME} [preview: ${ref}]`;
+};
 
 // The coach's voice, chosen by ear for this bake-off. This constant is
 // the single source of truth — no env override (one silently winning
 // over the code made voice changes look like they didn't take), and the
 // per-mint agent PATCH re-asserts it over any dashboard edit.
-const VOICE_ID = 'jkSXBeN4g5pNelNQ3YWw';
+const VOICE_ID = 'ImnfuV8oxhB7ya99oJfc';
+
+// Speaking rate, 0.7 (slowest) – 1.2 (fastest); 1.0 is the voice's natural
+// pace. Pinned here for the same reason as VOICE_ID: the per-mint PATCH
+// merges, so a tts field the code does NOT name survives a dashboard
+// "publish" forever (a dashboard speed edit once garbled speech mid-
+// greeting) — and one the code DOES name reverts within a mic tap. Change
+// it here, never in the dashboard.
+const VOICE_SPEED = 1.0;
 
 // Raw PCM in both directions: 16kHz mic upload (their ASR native rate) and
 // 24kHz agent audio down, which the client splices onto the same gapless
@@ -43,6 +64,18 @@ const proxyToken = async () => {
   const data = new TextEncoder().encode(`fu-eleven-llm:${process.env.ELEVENLABS_API_KEY}`);
   const hash = await crypto.subtle.digest('SHA-256', data);
   return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
+};
+
+// Preview deployments sit behind Vercel Deployment Protection, which
+// ElevenLabs' servers can't log in to — the custom-LLM callback got a login
+// page instead of Claude, so the agent heard the user and never answered.
+// "Protection Bypass for Automation" (project → Settings → Deployment
+// Protection) fixes that: Vercel injects the secret as this env var on
+// every deployment, and requests carrying it in this header pass through.
+// Harmless on production, where nothing is protected.
+const bypassHeaders = () => {
+  const secret = process.env.VERCEL_AUTOMATION_BYPASS_SECRET;
+  return secret ? { 'x-vercel-protection-bypass': secret } : {};
 };
 
 const desiredAgentConfig = (llmUrl, token) => ({
@@ -62,7 +95,7 @@ const desiredAgentConfig = (llmUrl, token) => ({
           url: llmUrl,
           model_id: 'claude-sonnet-4-6',
           api_type: 'chat_completions',
-          request_headers: { 'x-fu-proxy-token': token },
+          request_headers: { 'x-fu-proxy-token': token, ...bypassHeaders() },
         },
       },
     },
@@ -73,10 +106,7 @@ const desiredAgentConfig = (llmUrl, token) => ({
       model_id: 'eleven_flash_v2',
       voice_id: VOICE_ID,
       agent_output_audio_format: OUTPUT_FORMAT,
-      // Pinned explicitly: the per-mint PATCH merges, so any tts field NOT
-      // named here survives a dashboard "publish" forever (a dashboard
-      // speed edit garbled speech mid-greeting until this was asserted).
-      speed: 1.0,
+      speed: VOICE_SPEED,
     },
     asr: { user_input_audio_format: INPUT_FORMAT },
     conversation: {
@@ -141,11 +171,12 @@ export default async function handler(req) {
       });
     }
     const llmUrl = `https://${host}/api/eleven-llm`;
+    const agentName = agentNameFor(host);
     const agentConfig = desiredAgentConfig(llmUrl, await proxyToken());
 
     // Find the agent by name… (a failed list must NOT fall through to
     // create — that would mint a duplicate agent on every blip)
-    const listRes = await xi(`/v1/convai/agents?page_size=100&search=${encodeURIComponent(AGENT_NAME)}`);
+    const listRes = await xi(`/v1/convai/agents?page_size=100&search=${encodeURIComponent(agentName)}`);
     if (!listRes.ok) {
       const detail = (await listRes.text()).slice(0, 300);
       console.error('[eleven-session] agent list failed:', listRes.status, detail);
@@ -155,13 +186,13 @@ export default async function handler(req) {
       });
     }
     const list = await listRes.json();
-    let agentId = (list.agents || []).find(a => a.name === AGENT_NAME)?.agent_id || null;
+    let agentId = (list.agents || []).find(a => a.name === agentName)?.agent_id || null;
 
     // …create it if missing, else re-assert the desired config.
     if (!agentId) {
       const createRes = await xi('/v1/convai/agents/create', {
         method: 'POST',
-        body: JSON.stringify({ name: AGENT_NAME, tags: ['feelunderstood-sandbox'], ...agentConfig }),
+        body: JSON.stringify({ name: agentName, tags: [AGENT_BASE_NAME], ...agentConfig }),
       });
       if (!createRes.ok) {
         const detail = (await createRes.text()).slice(0, 300);
@@ -198,6 +229,7 @@ export default async function handler(req) {
     return new Response(JSON.stringify({
       signed_url,
       agent_id: agentId,
+      agent_name: agentName,
       input_sample_rate: 16000,
       output_sample_rate: 24000,
     }), {
