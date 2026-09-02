@@ -48,7 +48,7 @@ const VOICE_ID = 'jkSXBeN4g5pNelNQ3YWw';
 // "publish" forever (a dashboard speed edit once garbled speech mid-
 // greeting) — and one the code DOES name reverts within a mic tap. Change
 // it here, never in the dashboard.
-const VOICE_SPEED = 1.2;
+const VOICE_SPEED = 1.1;
 
 // Raw PCM in both directions: 16kHz mic upload (their ASR native rate) and
 // 24kHz agent audio down, which the client splices onto the same gapless
