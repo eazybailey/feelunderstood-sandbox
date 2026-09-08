@@ -26,9 +26,14 @@ reduced to the single Helpline path needed to compare Source-of-Truth prompts.
 ```
 feelunderstood-sandbox/
 ├── api/                       # Vercel serverless endpoints (all Edge Runtime)
+│   ├── _prompts.js           # THE SOURCE OF TRUTH — both variants' prompt
+│   │                         #   builders. Underscore = not an endpoint;
+│   │                         #   imported by chat-stream and eleven-llm.
+│   │                         #   Never in index.html (that file is public)
 │   ├── chat-stream.js        # Streaming Claude API for the typed no-session
-│   │                         #   fallback; relays array-form system prompt
-│   │                         #   unchanged; logs cache usage per turn
+│   │                         #   fallback; builds the system prompt server-
+│   │                         #   side from { profile, variant }; logs cache
+│   │                         #   usage per turn
 │   ├── eleven-session.js     # Ensures/configures the ElevenLabs agent and
 │   │                         #   mints a signed conversation WebSocket URL
 │   └── eleven-llm.js         # OpenAI-compatible custom-LLM endpoint the
@@ -37,6 +42,7 @@ feelunderstood-sandbox/
 ├── images/                    # favicon-64.png, icon-avatar.svg — nothing else
 ├── docs/
 │   └── SoT_V2.md             # Source text of the Deep variant's SoT block
+│                             #   (not served — the SPA rewrite catches it)
 ├── index.html                # Entire app — single-page React
 ├── styles.css                # Global styles (light theme)
 ├── vercel.json               # Clean URLs + SPA rewrites
@@ -61,9 +67,16 @@ conversations for hand-off between testers.
 
 ## The A/B Source of Truth toggle
 
-- `SOT_VARIANTS` in `index.html`: `A → light`, `B → deep` — **blind mapping,
-  never shown to testers**, who only see the `Coach: A | B` pill in the
-  Helpline banner.
+- **The prompt text lives only on the server**, in `api/_prompts.js`. The
+  browser sends `{ profile: { name }, variant: 'A' | 'B' }` to
+  `/api/chat-stream`, and `fu_profile` + `fu_variant` in the ElevenLabs
+  extra body to `/api/eleven-llm`; both build the prompt there. Nothing in
+  `index.html` or in any network request carries the Source of Truth, so it
+  can't be read with View Source or the network tab. Keep it that way: never
+  move prompt prose back into `index.html`.
+- `SOT_VARIANTS` in `api/_prompts.js`: `A → light`, `B → deep` — **blind
+  mapping, never shown to testers**, who only see the `Coach: A | B` pill in
+  the Helpline banner. The client knows only the keys (`SOT_VARIANT_KEYS`).
 - `light` = `buildCoachSystemPromptLight` — emits byte-identical output to the
   live app's `buildCoachSystemPrompt` for the name-only Helpline path.
 - `deep` = `buildCoachSystemPromptDeep` — runs Light, then replaces the span
@@ -76,10 +89,11 @@ conversations for hand-off between testers.
 - Switching variants always starts a fresh conversation (confirm shown if the
   chat has user turns). Choice persists in `localStorage`; `?v=a` / `?v=b`
   forces and persists it (send two links, attribute tests afterwards).
-- **Prompt caching is load-bearing**: the client sends `system` as
+- **Prompt caching is load-bearing**: `systemBlockFor` in `api/_prompts.js`
+  returns the prompt as
   `[{ type: 'text', text, cache_control: { type: 'ephemeral' } }]` so the
   ~47k-char Deep prompt doesn't add a first-token delay Light never pays.
-  `api/chat-stream.js` relays it unchanged and logs
+  Both endpoints send that block and log
   `cache_creation_input_tokens` / `cache_read_input_tokens` per turn — turn 1
   creation, turn 2+ reads > 0 is the proof it works.
 
@@ -103,12 +117,15 @@ User taps mic ONCE → POST /api/eleven-session
    request host — and mints a signed WebSocket URL; agent auth is enabled
    so the signed URL is the only way in)
   → browser opens wss to ElevenLabs (raw protocol, no SDK), sends the
-    variant prompt + prior history via conversation overrides /
-    custom_llm_extra_body; mic PCM16@16k streams up via ScriptProcessor
+    profile + variant key + prior history via custom_llm_extra_body
+    (fu_profile / fu_variant / fu_history — never the prompt text) and
+    the greeting via first_message; mic PCM16@16k streams up via
+    ScriptProcessor
   → ElevenLabs runs ASR, end-of-turn and barge-in server-side, and calls
     our /api/eleven-llm (OpenAI chat-completions shape) for every turn
-  → /api/eleven-llm rebuilds the exact chat-stream Claude call (fu_system
-    verbatim + cache_control; fu_history + session turns merged), streams
+  → /api/eleven-llm rebuilds the exact chat-stream Claude call (the variant
+    prompt built from fu_profile + fu_variant by api/_prompts.js, with
+    cache_control; fu_history + session turns merged), streams
     back OpenAI-format SSE, and strips the [[VISUAL]] channel so it is
     never spoken (known delta: no VisualAid cards on this stack)
   → agent PCM16@24k streams down and is spliced gaplessly onto the shared
@@ -142,9 +159,9 @@ when sending history back to Claude.
 
 | Endpoint | Purpose |
 |----------|---------|
-| `POST /api/chat-stream` | Streams Claude as simplified SSE (`data: {text}`, `data: [DONE]`) for the typed no-session fallback; clamps `max_tokens` to 1000; logs cache usage |
+| `POST /api/chat-stream` | Streams Claude as simplified SSE (`data: {text}`, `data: [DONE]`) for the typed no-session fallback; body is `{ messages, profile, variant, max_tokens }` — the system prompt is built server-side (a client-sent `system` is ignored); clamps `max_tokens` to 1000; logs cache usage |
 | `POST /api/eleven-session` | Ensures + configures this deployment's ElevenLabs agent (one per production / preview branch, idempotent by name; always re-patched so the custom-LLM URL tracks the deployment host), mints a signed conversation WebSocket URL |
-| `POST /api/eleven-llm` | OpenAI-compatible `/chat/completions` for the ElevenLabs agent (rewrite maps `/api/eleven-llm/chat/completions` here); auth via `x-fu-proxy-token`, an SHA-256 derivation of `ELEVENLABS_API_KEY` set on the agent config; relays to Claude with the same params + caching as chat-stream and logs usage as `[eleven-llm]` |
+| `POST /api/eleven-llm` | OpenAI-compatible `/chat/completions` for the ElevenLabs agent (rewrite maps `/api/eleven-llm/chat/completions` here); auth via `x-fu-proxy-token`, an SHA-256 derivation of `ELEVENLABS_API_KEY` set on the agent config; builds the variant prompt from `fu_profile` + `fu_variant` in the extra body (the system message ElevenLabs sends is ignored) and relays to Claude with the same params + caching as chat-stream, logging usage as `[eleven-llm]` |
 
 All endpoints are same-origin only (no CORS headers — deliberate), except
 `/api/eleven-llm`, which is called server-to-server by ElevenLabs and gated
@@ -153,8 +170,8 @@ by the shared-secret header instead.
 ## State & Storage
 
 React `useState`/`useRef` only. localStorage keys: `fu_conversations` (capped
-at 50, each stamped with `variant`, `variantName`, `sandboxVersion`,
-`voiceStack`), `fu_active_conversation`, `fu_profile` (`{ name }`),
+at 50, each stamped with `variant` (the neutral key only — the mapping is
+server-side), `sandboxVersion`, `voiceStack`), `fu_active_conversation`, `fu_profile` (`{ name }`),
 `fu_voice_muted`, `fu_sot_variant`. Greeting-only conversations are never
 persisted. There is no history UI — transcripts are read from localStorage
 via DevTools when needed.
@@ -176,6 +193,11 @@ like they didn't take).
 ## Development Notes
 
 - No build step — edit `index.html` / `styles.css` and deploy.
+- **`index.html` is public; `api/` is not.** Anything that must stay private
+  (the Source of Truth, the A/B mapping) lives under `api/` — `_prompts.js`
+  is the only place prompt prose belongs. `api/_prompts.js` is a shared
+  module (underscore-prefixed files in `api/` are not deployed as functions)
+  imported by the two Claude endpoints.
 - The visible version label is `SANDBOX_VERSION` in `index.html`
   (`sandbox-0.1`), hardcoded.
 - **Do not** reintroduce per-turn-dynamic content into the system prompt

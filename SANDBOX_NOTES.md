@@ -21,16 +21,23 @@ nothing else. Everything outside that path has been deleted from the codebase
 
 ## The A/B toggle
 
+- **Both variants' prompt text lives only on the server**, in
+  `api/_prompts.js`. The browser sends the profile (`{ name }`) and the
+  variant key — never the prompt — so the Source of Truth can't be read
+  with View Source or from the network tab. (Before this change the
+  builders sat in `index.html`, in plain text for anyone who loaded the
+  page.)
 - Testers see neutral labels only: a `Coach: A | B` pill in the Helpline
   banner. **The blind mapping (do not share with testers): A → `light`,
-  B → `deep`.**
+  B → `deep`.** It lives in `SOT_VARIANTS` in `api/_prompts.js`; the client
+  knows only the keys.
   - `light` = the live app's coach prompt. The stripped builder emits
     **byte-identical** output to the live `buildCoachSystemPrompt` for the
     name-only Helpline path (verified against a pre-strip snapshot).
   - `deep` = the same builder with one surgical change: the span between
     `THE DIALOGUE SYSTEM — YOUR SOURCE OF TRUTH:` and `HOW YOU INTERACT:` is
     replaced by SoT V2 Part A + Part B (`docs/SoT_V2.md`, embedded verbatim
-    as `SOT_V2_PART_A` / `SOT_V2_PART_B` in `index.html`). The splice runs on
+    as `SOT_V2_PART_A` / `SOT_V2_PART_B` in `api/_prompts.js`). The splice runs on
     Light's *output*, so everything outside the spliced span is byte-identical
     between variants by construction.
 - Switching mid-conversation always starts a fresh session (clean A/B), with
@@ -44,10 +51,11 @@ nothing else. Everything outside that path has been deleted from the codebase
 
 ## Prompt caching
 
-`index.html` sends `system` as a content-block array with
-`cache_control: { type: 'ephemeral' }` — required for a fair A/B, since the
-Deep block would otherwise add a first-token delay to every Deep reply that
-Light never pays. `api/chat-stream.js` relays the array unchanged and logs the
+`systemBlockFor` in `api/_prompts.js` returns the prompt as a content-block
+array with `cache_control: { type: 'ephemeral' }` — required for a fair A/B,
+since the Deep block would otherwise add a first-token delay to every Deep
+reply that Light never pays. `api/chat-stream.js` builds it from the
+`profile` + `variant` the client sends and logs the
 `usage` object from each turn's `message_start` event
 (`cache_creation_input_tokens` / `cache_read_input_tokens` — turn 1 should
 show creation, turn 2+ reads > 0). Check the Vercel function logs to verify.
@@ -58,7 +66,8 @@ One voice stack, the ElevenLabs Agents platform over one WebSocket: their
 ASR, end-of-turn detection, barge-in and TTS. The agent's LLM is a
 *custom LLM* pointed at our `/api/eleven-llm` proxy, which makes the
 identical Claude call as `/api/chat-stream` (same model, params, variant
-prompt, prompt caching — check Vercel logs for `[eleven-llm] usage:`), so
+prompt — built server-side from `fu_profile` + `fu_variant` in the extra
+body — and prompt caching; check Vercel logs for `[eleven-llm] variant`), so
 the A/B prompt toggle sits behind it unchanged. `/api/eleven-session`
 creates/updates the agent programmatically (named `feelunderstood-sandbox`
 in the ElevenLabs workspace, plus one `feelunderstood-sandbox [preview:
@@ -79,8 +88,8 @@ conversation stamped by the old stack is never resumed.
 ## Transcripts
 
 Conversations persist in `localStorage` under `fu_conversations`, each stamped
-with `variant`, `variantName`, `sandboxVersion`, and `voiceStack` so blind
-tests can be attributed afterwards. There is no in-app export UI — read the
+with `variant` (the neutral key — look the name up in `api/_prompts.js`),
+`sandboxVersion`, and `voiceStack` so blind tests can be attributed afterwards. There is no in-app export UI — read the
 key from DevTools (`localStorage.getItem('fu_conversations')`) on the tester's
 device if a transcript is needed.
 

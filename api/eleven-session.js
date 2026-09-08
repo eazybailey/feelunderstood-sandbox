@@ -5,9 +5,12 @@ export const config = { runtime: 'edge' };
 // The ElevenLabs stack runs on their Agents platform: one agent, configured
 // here on every mint, whose LLM is a *custom LLM* pointed back at our own
 // /api/eleven-llm proxy. That keeps Claude, the Anthropic key, and the A/B
-// Source-of-Truth logic behind our own endpoint — ElevenLabs only ever sees
-// OpenAI-format chat traffic — so prompt variants and voice stacks
-// cross-combine without either knowing about the other (build brief §3).
+// Source-of-Truth text behind our own endpoint — ElevenLabs only ever sees
+// OpenAI-format chat traffic, and the prompt is built server-side from the
+// profile + variant key in the extra body (api/_prompts.js), so neither
+// ElevenLabs nor the browser ever holds the Source of Truth — and prompt
+// variants and voice stacks cross-combine without either knowing about the
+// other (build brief §3).
 //
 // This endpoint (same-origin only, like the others — no CORS headers):
 //   1. Finds-or-creates this deployment's agent by name, then PATCHes its
@@ -86,10 +89,12 @@ const desiredAgentConfig = (llmUrl, token) => ({
       // app's own greeting for a fresh conversation, '' on a resume).
       first_message: '',
       prompt: {
-        // Placeholder only: every session overrides the prompt AND sends
-        // the built variant prompt in custom_llm_extra_body, which the
-        // proxy prefers verbatim (byte-identical → prompt cache hits).
-        prompt: 'You are a warm conversation coach. (Placeholder — the real prompt is supplied per session.)',
+        // Placeholder only — never used: the proxy builds the variant
+        // prompt server-side from fu_profile + fu_variant in
+        // custom_llm_extra_body and ignores the system message it is
+        // handed. Nothing stored on the ElevenLabs side carries the
+        // Source of Truth.
+        prompt: 'You are a warm conversation coach. (Placeholder — the real prompt is built by the custom LLM endpoint.)',
         llm: 'custom-llm',
         custom_llm: {
           url: llmUrl,
@@ -129,8 +134,11 @@ const desiredAgentConfig = (llmUrl, token) => ({
     auth: { enable_auth: true },
     overrides: {
       custom_llm_extra_body: true,
+      // Prompt override off (explicitly — the PATCH merges, so an
+      // unnamed field keeps its old value): the client no longer sends a
+      // prompt, and nothing that reaches ElevenLabs should carry one.
       conversation_config_override: {
-        agent: { first_message: true, prompt: { prompt: true } },
+        agent: { first_message: true, prompt: { prompt: false } },
       },
     },
   },

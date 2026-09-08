@@ -1,5 +1,7 @@
 export const config = { runtime: 'edge' };
 
+import { systemBlockFor } from './_prompts.js';
+
 // Custom-LLM endpoint for the ElevenLabs agent (v0.2 bake-off).
 //
 // ElevenLabs POSTs OpenAI-format chat completions here (it appends
@@ -10,14 +12,19 @@ export const config = { runtime: 'edge' };
 // prompt, prompt caching, max_tokens clamp — is EXACTLY the same as the
 // typed-fallback path's /api/chat-stream. Only the ears and mouth differ.
 //
-// The A/B Source of Truth rides in `custom_llm_extra_body`, set by the
-// client at session start and attached by ElevenLabs to every LLM call:
-//   fu_system     — the built variant prompt, verbatim. Preferred over the
-//                   system message ElevenLabs sends (which is our per-
-//                   session prompt override, but their pipeline may append
-//                   platform text to it) because the cache prefix and the
-//                   A/B comparison must stay byte-identical to the control
-//                   stack. Same bytes → same ephemeral cache entry.
+// The inputs to the A/B Source of Truth ride in `custom_llm_extra_body`,
+// set by the client at session start and attached by ElevenLabs to every
+// LLM call:
+//   fu_profile    — the tester's profile ({ name }).
+//   fu_variant    — the neutral variant key ('A' | 'B').
+//                   The prompt itself is built here from these two
+//                   (api/_prompts.js) — it is never sent by the client, so
+//                   the Source of Truth never passes through the browser
+//                   or ElevenLabs. The system message ElevenLabs sends (the
+//                   agent's placeholder, possibly with platform text
+//                   appended) is ignored, which also keeps the cache prefix
+//                   byte-identical turn to turn: same inputs → same bytes
+//                   → same ephemeral cache entry.
 //   fu_history    — turns from BEFORE this ElevenLabs session (resumed
 //                   conversations, text-fallback turns). ElevenLabs only
 //                   knows the turns of the live session; we prepend ours.
@@ -94,15 +101,12 @@ export default async function handler(req) {
       ? { ...body, ...body.elevenlabs_extra_body }
       : body;
 
-    const systemText = (typeof extra.fu_system === 'string' && extra.fu_system.trim())
-      ? extra.fu_system
-      : textOf((body.messages || []).find(m => m && m.role === 'system')?.content).trim();
-    if (!systemText) {
-      return new Response(JSON.stringify({ error: 'No system prompt supplied' }), {
-        status: 400,
-        headers: { 'Content-Type': 'application/json' },
-      });
+    if (!extra.fu_profile || typeof extra.fu_profile !== 'object') {
+      // A session opened by a stale client (pre-server-side prompts) or a
+      // bare re-engagement: still answer, just without the profile block.
+      console.warn('[eleven-llm] no fu_profile in extra body — prompt built without a profile');
     }
+    const { system, variant } = systemBlockFor({ profile: extra.fu_profile, variant: extra.fu_variant });
 
     const history = Array.isArray(extra.fu_history) ? extra.fu_history : [];
     const sessionMessages = Array.isArray(body.messages) ? body.messages : [];
@@ -130,11 +134,7 @@ export default async function handler(req) {
         stream: true,
         thinking: { type: 'disabled' },
         output_config: { effort: 'low' },
-        system: [{
-          type: 'text',
-          text: systemText,
-          cache_control: { type: 'ephemeral' },
-        }],
+        system,
         messages,
       }),
     });
@@ -206,7 +206,7 @@ export default async function handler(req) {
               if (parsed.type === 'message_start') {
                 // Cache verification readout, tagged per stack — turn 1
                 // creation, turn 2+ reads > 0, exactly like chat-stream.
-                console.log('[eleven-llm] usage:', JSON.stringify(parsed.message?.usage || null));
+                console.log('[eleven-llm] variant', variant, 'usage:', JSON.stringify(parsed.message?.usage || null));
               }
               if (parsed.type === 'content_block_delta' && parsed.delta?.text) {
                 full += parsed.delta.text;
