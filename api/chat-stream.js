@@ -1,7 +1,15 @@
 export const config = { runtime: 'edge' };
 
+import { systemBlockFor } from './_prompts.js';
+
 // Same-origin only: the app calls this with a relative URL, so no CORS
 // headers are sent — a wildcard made this a free cross-site Claude proxy.
+//
+// The system prompt is built here (api/_prompts.js) from the `profile`
+// and `variant` fields the client sends — never accepted as text from the
+// request — so the Source of Truth stays on the server. The ElevenLabs
+// proxy (/api/eleven-llm) builds the identical block from the same
+// inputs, so both paths share one prompt-cache entry per variant.
 export default async function handler(req) {
   if (req.method !== 'POST') {
     return new Response(JSON.stringify({ error: 'Method not allowed' }), {
@@ -11,7 +19,15 @@ export default async function handler(req) {
   }
 
   try {
-    const { messages, system, max_tokens } = await req.json();
+    const { messages, profile, variant, max_tokens } = await req.json();
+    if (!Array.isArray(messages)) {
+      return new Response(JSON.stringify({ error: 'messages must be an array' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    // Already wrapped as a cache_control: ephemeral text block.
+    const { system } = systemBlockFor({ profile, variant });
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
